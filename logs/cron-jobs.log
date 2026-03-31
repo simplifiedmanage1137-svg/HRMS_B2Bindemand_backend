@@ -1,0 +1,5 @@
+{"timestamp":"2026-03-25T18:29:02.576Z","type":"END_OF_DAY","message":"Marked 8 absent, 11 half_day","duration":2534,"environment":"development"}
+{"timestamp":"2026-03-25T18:29:02.672Z","type":"END_OF_DAY","message":"Marked 8 absent, 11 half_day","duration":2630,"environment":"development"}
+{"timestamp":"2026-03-26T18:29:02.604Z","type":"END_OF_DAY","message":"Marked 15 absent, 2 half_day","duration":2568,"environment":"development"}
+{"timestamp":"2026-03-26T18:29:02.609Z","type":"END_OF_DAY","message":"Marked 17 absent, 2 half_day","duration":2568,"environment":"development"}
+{"timestamp":"2026-03-26T18:29:02.643Z","type":"END_OF_DAY","message":"Marked 14 absent, 2 half_day","duration":2606,"environment":"development"}{"timestamp":"2026-03-30T18:29:02.954Z","type":"END_OF_DAY","message":"Marked 20 absent, 5 half_day","duration":2928,"environment":"development"}
