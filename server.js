@@ -86,14 +86,10 @@ app.use(cors({
             return callback(null, true);
         }
         
-        // TEMPORARY: Allow all origins for testing
-        console.log(`⚠️  TEMPORARILY allowing ${origin} for debugging`);
-        console.log(`   Consider adding this to ALLOWED_ORIGINS in .env`);
-        return callback(null, true);
-        
-        // Uncomment this for strict checking in production
-        // console.log(`❌ CORS blocked: ${origin}`);
-        // return callback(new Error(`Not allowed by CORS: ${origin}`));
+        // For debugging - log blocked origins
+        console.log(`❌ CORS blocked: ${origin}`);
+        console.log(`   Allowed origins:`, uniqueAllowedOrigins);
+        return callback(new Error(`Not allowed by CORS: ${origin}`));
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -105,8 +101,12 @@ app.use(cors({
         'Origin',
         'employee-id',
         'X-Employee-Id'
-    ]
+    ],
+    exposedHeaders: ['Content-Length', 'X-Request-Id'],
+    maxAge: 86400 // 24 hours - cache preflight results
 }));
+
+
 
 // Simple CORS logging middleware
 app.use((req, res, next) => {
