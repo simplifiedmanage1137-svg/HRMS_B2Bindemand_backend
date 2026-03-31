@@ -49,8 +49,6 @@ const allowedOriginsFromEnv = process.env.ALLOWED_ORIGINS
     : [];
 
 // Define allowed origins (including your Vercel frontend)
-// In server.js, update the allowedOrigins array:
-
 const allowedOrigins = [
     'http://localhost:5173',
     'http://localhost:5174',
@@ -62,7 +60,6 @@ const allowedOrigins = [
     'http://127.0.0.1:3001',
     'https://hrms-b2-bindemand-a31u.vercel.app', // Your Vercel frontend
     'https://hrms-qyui.onrender.com', // Your backend URL
-    'https://hrms-b2-bindemand-a31u.vercel.app',
     ...allowedOriginsFromEnv
 ];
 
@@ -74,12 +71,30 @@ uniqueAllowedOrigins.forEach(origin => {
     console.log(`   - ${origin}`);
 });
 
-// Configure CORS options
-// Replace the entire CORS configuration with this (temporary fix):
-
-// Simplified CORS for testing
-const corsOptions = {
-    origin: true, // This allows all origins
+// Apply CORS middleware - this handles OPTIONS automatically
+app.use(cors({
+    origin: function(origin, callback) {
+        // Allow requests with no origin (like mobile apps, curl, Postman)
+        if (!origin) {
+            console.log('✅ No origin header, allowing request');
+            return callback(null, true);
+        }
+        
+        // Check if origin is allowed
+        if (uniqueAllowedOrigins.includes(origin)) {
+            console.log(`✅ CORS allowed: ${origin}`);
+            return callback(null, true);
+        }
+        
+        // TEMPORARY: Allow all origins for testing
+        console.log(`⚠️  TEMPORARILY allowing ${origin} for debugging`);
+        console.log(`   Consider adding this to ALLOWED_ORIGINS in .env`);
+        return callback(null, true);
+        
+        // Uncomment this for strict checking in production
+        // console.log(`❌ CORS blocked: ${origin}`);
+        // return callback(new Error(`Not allowed by CORS: ${origin}`));
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: [
@@ -91,55 +106,12 @@ const corsOptions = {
         'employee-id',
         'X-Employee-Id'
     ]
-};
+}));
 
-// Apply CORS middleware FIRST
-app.use(cors(corsOptions));
-
-// Add this before app.use(cors(corsOptions))
-app.use((req, res, next) => {
-    console.log('=== CORS Debug ===');
-    console.log('Request Origin:', req.headers.origin);
-    console.log('Request Method:', req.method);
-    console.log('Request URL:', req.url);
-    console.log('Request Headers:', req.headers);
-    
-    // Set CORS headers manually as a fallback
-    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, employee-id, X-Employee-Id');
-    res.header('Access-Control-Allow-Credentials', 'true');
-    
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
-    }
-    next();
-});
-
-// Handle preflight OPTIONS requests manually (replaces app.options('*', cors(corsOptions)))
-app.use((req, res, next) => {
-    if (req.method === 'OPTIONS') {
-        // Set CORS headers for preflight requests
-        const origin = req.headers.origin;
-        if (!origin || uniqueAllowedOrigins.includes(origin)) {
-            res.header('Access-Control-Allow-Origin', origin || uniqueAllowedOrigins[0]);
-        }
-        res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-        res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, employee-id, X-Employee-Id');
-        res.header('Access-Control-Allow-Credentials', 'true');
-        res.header('Access-Control-Max-Age', '86400'); // 24 hours
-        return res.status(200).end();
-    }
-    next();
-});
-
-// Additional CORS logging middleware
+// Simple CORS logging middleware
 app.use((req, res, next) => {
     const origin = req.headers.origin;
     console.log(`📍 ${req.method} ${req.url} - Origin: ${origin || 'no origin'}`);
-    if (origin && uniqueAllowedOrigins.includes(origin)) {
-        console.log(`✅ CORS allowed: ${origin}`);
-    }
     next();
 });
 
