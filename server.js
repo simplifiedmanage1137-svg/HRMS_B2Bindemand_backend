@@ -59,7 +59,7 @@ const allowedOrigins = [
     'http://127.0.0.1:3000',
     'http://127.0.0.1:3001',
     'https://hrms-b2-bindemand-a31u.vercel.app', // Your Vercel frontend
-    'https://hrms-qyui.onrender.com', // Your backend URL
+    'https://hrms-b2bindemand-backend.onrender.com', // Your backend URL
     ...allowedOriginsFromEnv
 ];
 
