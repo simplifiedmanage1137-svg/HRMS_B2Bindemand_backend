@@ -3,6 +3,7 @@ const LeaveYearlyService = require('../services/leaveYearlyService');
 const supabase = require('../config/supabase');
 
 // In leaveController.js - Updated getLeaveBalance
+
 exports.getLeaveBalance = async (req, res) => {
     try {
         const { employee_id } = req.params;
@@ -21,71 +22,16 @@ exports.getLeaveBalance = async (req, res) => {
         const joiningDate = new Date(employee.joining_date);
         const today = new Date();
         const currentYear = today.getFullYear();
-        const currentMonth = today.getMonth();
-        const currentDate = today.getDate();
 
-        // Get last day of current month
-        const lastDayOfMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
-        const isLastDayOfMonth = currentDate === lastDayOfMonth;
-        const currentHour = today.getHours();
-        const isAfter11PM = currentHour >= 23;
+        // Calculate total months including current month if passed joining date
+        const totalMonths = LeaveYearlyService.calculateTotalMonthsFromJoining(joiningDate, today);
+        const accruedMonthsThisYear = LeaveYearlyService.getCurrentYearAccruedMonths(joiningDate, today);
 
-        // Check if we should include current month's accrual
-        let includeCurrentMonthAccrual = false;
-        if (isLastDayOfMonth && isAfter11PM) {
-            includeCurrentMonthAccrual = true;
-        } else if (currentDate > lastDayOfMonth) {
-            includeCurrentMonthAccrual = true;
-        }
-
-        // Calculate months from joining to current date (including current month if complete)
-        let monthsFromJoining = (today.getFullYear() - joiningDate.getFullYear()) * 12;
-        monthsFromJoining += (today.getMonth() - joiningDate.getMonth());
-
-        // Adjust for day of month
-        if (today.getDate() < joiningDate.getDate()) {
-            monthsFromJoining -= 1;
-        }
-
-        // Add 1 if current month is complete
-        if (includeCurrentMonthAccrual) {
-            monthsFromJoining = Math.max(0, monthsFromJoining + 1);
-        }
-        monthsFromJoining = Math.max(0, monthsFromJoining);
-
-        // Calculate total accrued leaves from joining (1.5 per month)
-        // ✅ FIX: Show accrued leaves even during probation
-        const totalAccruedOverall = monthsFromJoining * 1.5;
-
-        // Calculate current year's accrual (for display)
-        let currentYearAccrual = 0;
-        let accrualMonthsThisYear = 0;
-
-        if (joiningDate.getFullYear() === currentYear) {
-            // Joined this year
-            const joinMonth = joiningDate.getMonth();
-            let monthsThisYear = currentMonth - joinMonth;
-
-            if (includeCurrentMonthAccrual) {
-                monthsThisYear += 1;
-            }
-            if (today.getDate() < joiningDate.getDate()) {
-                monthsThisYear -= 1;
-            }
-            accrualMonthsThisYear = Math.max(0, monthsThisYear);
-            currentYearAccrual = accrualMonthsThisYear * 1.5;
-        } else {
-            // Joined in previous years
-            let monthsThisYear = currentMonth + 1; // Jan = 1 month
-            if (!includeCurrentMonthAccrual && currentDate <= lastDayOfMonth) {
-                monthsThisYear = Math.max(0, monthsThisYear - 1);
-            }
-            accrualMonthsThisYear = monthsThisYear;
-            currentYearAccrual = accrualMonthsThisYear * 1.5;
-        }
+        const totalAccruedOverall = totalMonths * 1.5;
+        const currentYearAccrual = accruedMonthsThisYear * 1.5;
 
         // Check probation status (6 months from joining)
-        const isProbationComplete = monthsFromJoining >= 6;
+        const isProbationComplete = totalMonths >= 6;
 
         // Calculate eligible from date
         const eligibleFromDate = new Date(joiningDate);
@@ -118,32 +64,26 @@ exports.getLeaveBalance = async (req, res) => {
         if (pendingError) throw pendingError;
         const pending = pendingLeaves?.reduce((sum, leave) => sum + (leave.days_count || 0), 0) || 0;
 
-        // ✅ FIX: Calculate available balance
-        // During probation: available = 0 (can't use), but total_accrued shows accumulated leaves
-        // After probation: available = total_accrued - used - pending
+        // Calculate available balance
         let available = 0;
-        let usableLeaves = 0;
 
         if (isProbationComplete) {
             // After probation - can use all accrued leaves
-            usableLeaves = currentYearAccrual;
             available = Math.max(0, currentYearAccrual - used - pending);
         } else {
             // During probation - leaves are accruing but cannot be used
-            usableLeaves = 0;
             available = 0;
         }
 
         console.log('📊 Leave Calculation:', {
             joining_date: employee.joining_date,
-            months_from_joining: monthsFromJoining,
+            total_months: totalMonths,
             total_accrued_overall: totalAccruedOverall,
             current_year_accrual: currentYearAccrual,
-            accrual_months_this_year: accrualMonthsThisYear,
+            accrued_months_this_year: accruedMonthsThisYear,
             used: used,
             pending: pending,
             available: available,
-            usable_leaves: usableLeaves,
             is_probation_complete: isProbationComplete
         });
 
@@ -171,16 +111,17 @@ exports.getLeaveBalance = async (req, res) => {
             pending: pending.toFixed(1),
             available: available.toFixed(1),
             comp_off_balance: (employee.comp_off_balance || 0).toFixed(1),
-            months_completed: monthsFromJoining,
-            is_probation_complete: isProbationComplete,  // ✅ Make sure this exists
+            total_months: totalMonths,
+            months_completed: totalMonths,
+            is_probation_complete: isProbationComplete,
             is_eligible: isProbationComplete,
             eligible_from_date: eligibleFromDateStr,
             leave_year: currentYear,
             joining_date: employee.joining_date,
             probation_info: {
                 is_active: !isProbationComplete,
-                months_completed: monthsFromJoining,
-                months_remaining: Math.max(0, 6 - monthsFromJoining),
+                months_completed: totalMonths,
+                months_remaining: Math.max(0, 6 - totalMonths),
                 eligible_from_date: eligibleFromDateStr,
                 accrued_but_unusable: !isProbationComplete ? currentYearAccrual : 0
             }
@@ -237,14 +178,7 @@ exports.applyLeave = async (req, res) => {
         const joiningDate = new Date(employee.joining_date);
         const today = new Date();
 
-        let monthsCompleted = (today.getFullYear() - joiningDate.getFullYear()) * 12;
-        monthsCompleted += (today.getMonth() - joiningDate.getMonth());
-
-        if (today.getDate() < joiningDate.getDate()) {
-            monthsCompleted -= 1;
-        }
-
-        monthsCompleted = Math.max(0, monthsCompleted);
+        const monthsCompleted = LeaveYearlyService.calculateCompletedMonthsFromJoining(joiningDate, today);
         const isProbationComplete = monthsCompleted >= 6;
 
         // Check leave eligibility based on probation status
@@ -760,14 +694,7 @@ exports.getLeaveTypes = async (req, res) => {
                 const joiningDate = new Date(empData.joining_date);
                 const today = new Date();
 
-                let monthsCompleted = (today.getFullYear() - joiningDate.getFullYear()) * 12;
-                monthsCompleted += (today.getMonth() - joiningDate.getMonth());
-
-                if (today.getDate() < joiningDate.getDate()) {
-                    monthsCompleted -= 1;
-                }
-
-                monthsCompleted = Math.max(0, monthsCompleted);
+                const monthsCompleted = LeaveYearlyService.calculateCompletedMonthsFromJoining(joiningDate, today);
 
                 if (monthsCompleted >= 6) {
                     availableTypes.push(
@@ -826,6 +753,56 @@ exports.yearlyReset = async (req, res) => {
             error: error.message
         });
     }
+};
+
+// In leaveController.js - Updated getLeaveBalance function
+
+// Get current year's completed months (FIXED)
+const getCurrentYearCompletedMonths = (joiningDate, currentDate = new Date()) => {
+    const today = new Date(currentDate);
+    const currentYear = today.getFullYear();
+    const join = new Date(joiningDate);
+
+    // For employees who joined this year
+    if (join.getFullYear() === currentYear) {
+        // Count completed months (full months after joining)
+        let completedMonths = 0;
+        const currentMonth = today.getMonth();
+        const joinMonth = join.getMonth();
+        const joinDay = join.getDate();
+
+        // A month is considered completed when:
+        // Example: Joined March 2, 2026
+        // - March 2-31: Month 0 (not completed)
+        // - April 1: Still month 0 (need to complete full April to get March)
+        // - May 1: Now March is completed? Actually March is joining month, so first accrual is for April on May 1
+
+        for (let month = joinMonth + 1; month <= currentMonth; month++) {
+            if (month < currentMonth) {
+                // Past months are fully completed
+                completedMonths++;
+            } else if (month === currentMonth) {
+                // For current month, check if we've completed it
+                // We complete a month when we reach the same day of next month
+                if (today.getDate() >= joinDay) {
+                    completedMonths++;
+                }
+            }
+        }
+
+        return Math.max(0, completedMonths);
+    }
+
+    // For employees joined in previous years
+    let completedMonths = 0;
+    for (let month = 0; month <= today.getMonth(); month++) {
+        if (month < today.getMonth()) {
+            completedMonths++;
+        } else if (month === today.getMonth() && today.getDate() >= 1) {
+            completedMonths++;
+        }
+    }
+    return Math.max(0, completedMonths);
 };
 
 module.exports = exports;

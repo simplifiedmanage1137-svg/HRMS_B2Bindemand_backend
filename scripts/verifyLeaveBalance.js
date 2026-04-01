@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const LeaveYearlyService = require('../services/leaveYearlyService');
 
 async function verifyLeaveBalance(employeeId) {
     console.log('\n' + '='.repeat(70));
@@ -23,22 +24,12 @@ async function verifyLeaveBalance(employeeId) {
         const joiningDate = new Date(emp.joining_date);
         const today = new Date();
         
-        // Calculate total months since joining (including current month if past joining date)
-        const yearsDiff = today.getFullYear() - joiningDate.getFullYear();
-        let totalMonths = (yearsDiff * 12) + (today.getMonth() - joiningDate.getMonth());
-        
-        // Adjust for day of month
-        if (today.getDate() < joiningDate.getDate()) {
-            totalMonths--;
-        }
-
-        // Add current month if past joining date (for accrual calculation)
-        // This matches the logic in leaveController
-        const monthsForAccrual = totalMonths + (today.getDate() >= joiningDate.getDate() ? 1 : 0);
+        // Calculate completed months since joining using shared service (month boundaries)
+        const monthsCompleted = LeaveYearlyService.calculateCompletedMonthsFromJoining(joiningDate, today);
 
         // Calculate expected leaves (accrued from month 1)
-        const expectedAccrued = monthsForAccrual * 1.5;
-        const isEligibleToApply = totalMonths >= 6; // Need 6 complete months
+        const expectedAccrued = monthsCompleted * 1.5;
+        const isEligibleToApply = monthsCompleted >= 6; // Need 6 complete months
 
         // Get used leaves (approved)
         const { data: usedLeaves, error: usedError } = await supabase
