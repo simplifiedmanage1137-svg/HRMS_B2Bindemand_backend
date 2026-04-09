@@ -1,108 +1,77 @@
 // cron/monthlyLeaveAccrual.js
 const cron = require('node-cron');
 const LeaveYearlyService = require('../services/leaveYearlyService');
-const supabase = require('../config/supabase');
 
-// Run every minute to check if it's time to accrue
-cron.schedule('* * * * *', async () => {
+// ============== MONTHLY LEAVE ACCRUAL ==============
+// ✅ Runs at 00:00 (midnight) on the LAST DAY of every month
+cron.schedule('0 0 28-31 * *', async () => {
     const now = new Date();
+    const currentDate = now.getDate();
     const currentYear = now.getFullYear();
     const currentMonth = now.getMonth();
-    const currentDate = now.getDate();
-    const currentHour = now.getHours();
-    const currentMinute = now.getMinutes();
     
+    // Check if today is actually the last day of the month
     const lastDayOfMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
-    const isLastDay = currentDate === lastDayOfMonth;
-    const isAfter1159PM = (currentHour === 23 && currentMinute >= 59) || (currentHour >= 0 && currentDate > lastDayOfMonth);
     
-    // Only run on last day of month at/after 11:59 PM, or on 1st of next month
-    if (!isLastDay && !(currentDate === 1 && isAfter1159PM)) {
+    if (currentDate !== lastDayOfMonth) {
+        // Not the last day, skip
         return;
     }
     
     console.log('='.repeat(70));
-    console.log('🔄 RUNNING MONTHLY LEAVE ACCRUAL JOB');
+    console.log('🔄 MONTHLY LEAVE ACCRUAL - MIDNIGHT TRIGGER');
     console.log('Date:', now.toLocaleString());
     console.log('Time:', now.toLocaleTimeString());
-    console.log('Month:', new Date(currentYear, currentMonth, 1).toLocaleString('default', { month: 'long' }));
+    console.log(`Month: ${now.toLocaleString('default', { month: 'long' })} ${currentYear}`);
     console.log('='.repeat(70));
     
     try {
-        // Get all active employees
-        const { data: employees, error: empError } = await supabase
-            .from('employees')
-            .select('employee_id, joining_date, first_name, last_name')
-            .eq('is_active', true);
-
-        if (empError) throw empError;
-
-        const results = {
-            total: employees?.length || 0,
-            successful: 0,
-            failed: 0,
-            skipped: 0,
-            details: []
-        };
-
-        for (const emp of employees || []) {
-            try {
-                const result = await LeaveYearlyService.addMonthlyAccrual(emp.employee_id);
-                
-                if (result.success) {
-                    results.successful++;
-                    results.details.push({
-                        employee_id: emp.employee_id,
-                        name: `${emp.first_name} ${emp.last_name}`,
-                        status: 'success',
-                        message: result.message
-                    });
-                    console.log(`✅ ${emp.employee_id}: ${result.message}`);
-                } else if (result.message.includes('Already accrued')) {
-                    results.skipped++;
-                    results.details.push({
-                        employee_id: emp.employee_id,
-                        name: `${emp.first_name} ${emp.last_name}`,
-                        status: 'skipped',
-                        message: result.message
-                    });
-                } else {
-                    results.failed++;
-                    results.details.push({
-                        employee_id: emp.employee_id,
-                        name: `${emp.first_name} ${emp.last_name}`,
-                        status: 'failed',
-                        message: result.message
-                    });
-                    console.log(`⚠️ ${emp.employee_id}: ${result.message}`);
-                }
-                
-            } catch (empError) {
-                results.failed++;
-                results.details.push({
-                    employee_id: emp.employee_id,
-                    name: `${emp.first_name} ${emp.last_name}`,
-                    status: 'failed',
-                    error: empError.message
-                });
-                console.error(`❌ Error for ${emp.employee_id}:`, empError.message);
-            }
+        // Call the service method (which processes all eligible employees)
+        const result = await LeaveYearlyService.addMonthlyAccrual();
+        
+        if (result.success) {
+            console.log('✅ Monthly accrual completed successfully');
+            console.log('Summary:', result.summary);
+        } else {
+            console.log('⚠️', result.message);
         }
-
-        console.log('='.repeat(70));
-        console.log('📊 MONTHLY ACCRUAL SUMMARY');
-        console.log(`Month: ${new Date(currentYear, currentMonth, 1).toLocaleString('default', { month: 'long' })} ${currentYear}`);
-        console.log(`Total employees: ${results.total}`);
-        console.log(`Successful: ${results.successful}`);
-        console.log(`Skipped: ${results.skipped}`);
-        console.log(`Failed: ${results.failed}`);
-        console.log('='.repeat(70));
+        
+        console.log('='.repeat(70) + '\n');
         
     } catch (error) {
         console.error('❌ Monthly accrual job failed:', error);
     }
-    
-    console.log('='.repeat(70) + '\n');
 });
 
-console.log('✅ Monthly leave accrual cron job configured (runs at 11:59 PM on last day of month)');
+// ============== YEAR-END LEAVE RESET ==============
+// ✅ Runs at 00:00 (midnight) on JANUARY 1st every year
+cron.schedule('0 0 1 1 *', async () => {
+    const now = new Date();
+    
+    console.log('='.repeat(70));
+    console.log('🎆 YEAR-END LEAVE RESET - MIDNIGHT TRIGGER');
+    console.log('Date:', now.toLocaleString());
+    console.log('New Year:', now.getFullYear());
+    console.log('='.repeat(70));
+    
+    try {
+        const result = await LeaveYearlyService.resetForNewYear();
+        
+        if (result.success) {
+            console.log('✅ Year-end reset completed successfully');
+            console.log('Results:', result.results);
+        } else {
+            console.log('⚠️ Reset incomplete');
+        }
+        
+        console.log('='.repeat(70) + '\n');
+        
+    } catch (error) {
+        console.error('❌ Year-end reset failed:', error);
+    }
+});
+
+console.log('✅ Monthly leave accrual cron: 00:00 on last day of month');
+console.log('✅ Year-end reset cron: 00:00 on January 1st');
+
+module.exports = {};

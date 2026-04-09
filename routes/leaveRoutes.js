@@ -1,7 +1,10 @@
-// routes/leaveRoutes.js - Simplified version
+// routes/leaveRoutes.js - FIXED VERSION
 const express = require('express');
 const router = express.Router();
 const leaveController = require('../controllers/leaveController');
+
+// Debug: Check what functions are available
+console.log('🔍 Available leaveController methods:', Object.keys(leaveController));
 
 // Get leave types
 router.get('/types', leaveController.getLeaveTypes);

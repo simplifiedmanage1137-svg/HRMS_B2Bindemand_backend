@@ -1,16 +1,80 @@
-// controllers/leaveController.js
-const LeaveYearlyService = require('../services/leaveYearlyService');
+// controllers/leaveController.js - COMPLETE WORKING VERSION
+
 const supabase = require('../config/supabase');
 
-// In leaveController.js - Updated getLeaveBalance
+// ==================== LOCAL HELPER FUNCTIONS ====================
 
+// Replace the getCompletedMonthsInCurrentYear function with this simplified version:
+
+function getCompletedMonthsInCurrentYear(joiningDate, currentDate = new Date()) {
+    const today = new Date(currentDate);
+    const currentYear = today.getFullYear();
+    const currentMonth = today.getMonth(); // 0-11 (April = 3)
+    const join = new Date(joiningDate);
+    
+    if (join.getFullYear() > currentYear) {
+        return 0;
+    }
+    
+    let completedMonths = 0;
+    
+    if (join.getFullYear() === currentYear) {
+        // Joined this year
+        const joinMonth = join.getMonth();
+        // Count months from joining month to previous month
+        for (let month = joinMonth; month < currentMonth; month++) {
+            completedMonths++;
+        }
+    } else {
+        // Joined previous year or earlier
+        // Count months from January to previous month
+        for (let month = 0; month < currentMonth; month++) {
+            completedMonths++;
+        }
+    }
+    
+    return Math.max(0, completedMonths);
+}
+
+function calculateCurrentYearAccruedLeaves(joiningDate, currentDate = new Date()) {
+    const completedMonths = getCompletedMonthsInCurrentYear(joiningDate, currentDate);
+    return completedMonths * 1.5;
+}
+
+function getTotalMonthsFromJoining(joiningDate, currentDate = new Date()) {
+    const join = new Date(joiningDate);
+    const today = new Date(currentDate);
+    
+    if (today < join) return 0;
+    
+    let totalMonths = (today.getFullYear() - join.getFullYear()) * 12 + 
+                      (today.getMonth() - join.getMonth());
+    
+    if (today.getDate() < join.getDate()) {
+        totalMonths = Math.max(0, totalMonths - 1);
+    }
+    
+    return totalMonths;
+}
+
+function isProbationComplete(joiningDate, currentDate = new Date()) {
+    const totalMonths = getTotalMonthsFromJoining(joiningDate, currentDate);
+    return totalMonths >= 6;
+}
+
+function getEligibleFromDate(joiningDate) {
+    const eligibleDate = new Date(joiningDate);
+    eligibleDate.setMonth(eligibleDate.getMonth() + 6);
+    return eligibleDate.toISOString().split('T')[0];
+}
+
+// ==================== GET LEAVE BALANCE ====================
 exports.getLeaveBalance = async (req, res) => {
     try {
         const { employee_id } = req.params;
 
         console.log('📊 Fetching leave balance for employee:', employee_id);
 
-        // Get employee details
         const { data: employee, error: empError } = await supabase
             .from('employees')
             .select('joining_date, comp_off_balance')
@@ -23,22 +87,22 @@ exports.getLeaveBalance = async (req, res) => {
         const today = new Date();
         const currentYear = today.getFullYear();
 
-        // Calculate total months including current month if passed joining date
-        const totalMonths = LeaveYearlyService.calculateTotalMonthsFromJoining(joiningDate, today);
-        const accruedMonthsThisYear = LeaveYearlyService.getCurrentYearAccruedMonths(joiningDate, today);
+        const currentYearAccrual = calculateCurrentYearAccruedLeaves(joiningDate, today);
+        const totalMonthsFromJoining = getTotalMonthsFromJoining(joiningDate, today);
+        const isProbComplete = isProbationComplete(joiningDate, today);
+        const eligibleFromDateStr = getEligibleFromDate(joiningDate);
+        const completedMonths = getCompletedMonthsInCurrentYear(joiningDate, today);
 
-        const totalAccruedOverall = totalMonths * 1.5;
-        const currentYearAccrual = accruedMonthsThisYear * 1.5;
+        console.log('📊 Leave Calculation:', {
+            employee_id,
+            joining_date: employee.joining_date,
+            current_year: currentYear,
+            completed_months_in_current_year: completedMonths,
+            current_year_accrual: currentYearAccrual,
+            total_months_from_joining: totalMonthsFromJoining,
+            is_probation_complete: isProbComplete
+        });
 
-        // Check probation status (6 months from joining)
-        const isProbationComplete = totalMonths >= 6;
-
-        // Calculate eligible from date
-        const eligibleFromDate = new Date(joiningDate);
-        eligibleFromDate.setMonth(eligibleFromDate.getMonth() + 6);
-        const eligibleFromDateStr = eligibleFromDate.toISOString().split('T')[0];
-
-        // Get used leaves for current year
         const { data: usedLeaves, error: usedError } = await supabase
             .from('leaves')
             .select('days_count')
@@ -51,7 +115,6 @@ exports.getLeaveBalance = async (req, res) => {
         if (usedError) throw usedError;
         const used = usedLeaves?.reduce((sum, leave) => sum + (leave.days_count || 0), 0) || 0;
 
-        // Get pending leaves for current year
         const { data: pendingLeaves, error: pendingError } = await supabase
             .from('leaves')
             .select('days_count')
@@ -64,31 +127,12 @@ exports.getLeaveBalance = async (req, res) => {
         if (pendingError) throw pendingError;
         const pending = pendingLeaves?.reduce((sum, leave) => sum + (leave.days_count || 0), 0) || 0;
 
-        // Calculate available balance
         let available = 0;
-
-        if (isProbationComplete) {
-            // After probation - can use all accrued leaves
+        if (isProbComplete) {
             available = Math.max(0, currentYearAccrual - used - pending);
-        } else {
-            // During probation - leaves are accruing but cannot be used
-            available = 0;
         }
 
-        console.log('📊 Leave Calculation:', {
-            joining_date: employee.joining_date,
-            total_months: totalMonths,
-            total_accrued_overall: totalAccruedOverall,
-            current_year_accrual: currentYearAccrual,
-            accrued_months_this_year: accruedMonthsThisYear,
-            used: used,
-            pending: pending,
-            available: available,
-            is_probation_complete: isProbationComplete
-        });
-
-        // Update or create balance record
-        const { error: upsertError } = await supabase
+        await supabase
             .from('leave_balance')
             .upsert({
                 employee_id,
@@ -102,8 +146,6 @@ exports.getLeaveBalance = async (req, res) => {
                 onConflict: 'employee_id,leave_year'
             });
 
-        if (upsertError) console.error('Upsert error:', upsertError);
-
         res.json({
             success: true,
             total_accrued: currentYearAccrual.toFixed(1),
@@ -111,19 +153,20 @@ exports.getLeaveBalance = async (req, res) => {
             pending: pending.toFixed(1),
             available: available.toFixed(1),
             comp_off_balance: (employee.comp_off_balance || 0).toFixed(1),
-            total_months: totalMonths,
-            months_completed: totalMonths,
-            is_probation_complete: isProbationComplete,
-            is_eligible: isProbationComplete,
+            months_completed_in_year: completedMonths,
+            total_months_from_joining: totalMonthsFromJoining,
+            is_probation_complete: isProbComplete,
+            is_eligible: isProbComplete,
             eligible_from_date: eligibleFromDateStr,
             leave_year: currentYear,
             joining_date: employee.joining_date,
+            next_accrual_date: new Date(currentYear, today.getMonth() + 1, 0).toISOString().split('T')[0],
             probation_info: {
-                is_active: !isProbationComplete,
-                months_completed: totalMonths,
-                months_remaining: Math.max(0, 6 - totalMonths),
+                is_active: !isProbComplete,
+                months_completed: totalMonthsFromJoining,
+                months_remaining: Math.max(0, 6 - totalMonthsFromJoining),
                 eligible_from_date: eligibleFromDateStr,
-                accrued_but_unusable: !isProbationComplete ? currentYearAccrual : 0
+                accrued_but_unusable: !isProbComplete ? currentYearAccrual : 0
             }
         });
 
@@ -137,7 +180,7 @@ exports.getLeaveBalance = async (req, res) => {
     }
 };
 
-// In leaveController.js - Updated applyLeave function
+// ==================== APPLY LEAVE ====================
 exports.applyLeave = async (req, res) => {
     try {
         console.log('='.repeat(50));
@@ -157,7 +200,6 @@ exports.applyLeave = async (req, res) => {
             reporting_manager
         } = req.body;
 
-        // Validation
         if (!employee_id || !leave_type || !start_date || !reason) {
             return res.status(400).json({
                 success: false,
@@ -165,7 +207,6 @@ exports.applyLeave = async (req, res) => {
             });
         }
 
-        // Get employee details
         const { data: employee, error: empError } = await supabase
             .from('employees')
             .select('joining_date, comp_off_balance')
@@ -174,31 +215,32 @@ exports.applyLeave = async (req, res) => {
 
         if (empError) throw empError;
 
-        // Calculate months completed
         const joiningDate = new Date(employee.joining_date);
         const today = new Date();
+        
+        let totalMonths = (today.getFullYear() - joiningDate.getFullYear()) * 12 + 
+                          (today.getMonth() - joiningDate.getMonth());
+        if (today.getDate() < joiningDate.getDate()) {
+            totalMonths = Math.max(0, totalMonths - 1);
+        }
+        const isProbComplete = totalMonths >= 6;
 
-        const monthsCompleted = LeaveYearlyService.calculateCompletedMonthsFromJoining(joiningDate, today);
-        const isProbationComplete = monthsCompleted >= 6;
+        console.log('📊 Probation check:', {
+            joining_date: employee.joining_date,
+            total_months: totalMonths,
+            isProbationComplete: isProbComplete
+        });
 
-        // Check leave eligibility based on probation status
-        if (!isProbationComplete) {
-            // During probation - only Unpaid and Comp-Off allowed
+        if (!isProbComplete) {
             if (leave_type !== 'Unpaid' && leave_type !== 'Comp-Off') {
                 return res.status(400).json({
                     success: false,
-                    message: `During probation period (${monthsCompleted}/6 months completed), you can only apply for Unpaid Leave or Comp-Off. You will be eligible for paid leaves after ${6 - monthsCompleted} more month(s).`,
-                    probation_status: {
-                        months_completed: monthsCompleted,
-                        months_remaining: 6 - monthsCompleted,
-                        eligible_from_date: new Date(joiningDate.setMonth(joiningDate.getMonth() + 6)).toISOString().split('T')[0]
-                    }
+                    message: `During probation period (${totalMonths}/6 months completed), you can only apply for Unpaid Leave or Comp-Off.`
                 });
             }
         }
 
-        // Check leave balance for paid leaves (only if probation is complete)
-        if (isProbationComplete && leave_type !== 'Unpaid' && leave_type !== 'Comp-Off') {
+        if (isProbComplete && leave_type !== 'Unpaid' && leave_type !== 'Comp-Off') {
             const { data: balanceData, error: balanceError } = await supabase
                 .from('leave_balance')
                 .select('current_balance')
@@ -213,14 +255,11 @@ exports.applyLeave = async (req, res) => {
             if (available < days_count) {
                 return res.status(400).json({
                     success: false,
-                    message: `Insufficient leave balance. Available: ${available.toFixed(1)} days. You need ${days_count} days.`,
-                    current_balance: available,
-                    required: days_count
+                    message: `Insufficient leave balance. Available: ${available.toFixed(1)} days.`
                 });
             }
         }
 
-        // Check comp-off balance
         if (leave_type === 'Comp-Off') {
             if ((employee.comp_off_balance || 0) < days_count) {
                 return res.status(400).json({
@@ -230,7 +269,6 @@ exports.applyLeave = async (req, res) => {
             }
         }
 
-        // Insert leave record
         const { data: leaveData, error: leaveError } = await supabase
             .from('leaves')
             .insert([{
@@ -255,297 +293,52 @@ exports.applyLeave = async (req, res) => {
             return res.status(500).json({
                 success: false,
                 message: 'Failed to submit leave request',
-                error: leaveError.message,
-                details: leaveError
+                error: leaveError.message
             });
         }
 
         console.log('✅ Leave applied successfully:', leaveData[0]);
 
-        // Prepare response message
-        let message = '';
-        if (leave_type === 'Comp-Off') {
-            message = 'Comp-Off request submitted successfully!';
-        } else if (!isProbationComplete) {
-            message = `Leave request submitted successfully! Note: You are still in probation (${monthsCompleted}/6 months). This will be treated as Unpaid Leave.`;
-        } else {
-            message = 'Leave request submitted successfully!';
-        }
-
         res.json({
             success: true,
-            message: message,
-            leave: leaveData[0],
-            probation_status: !isProbationComplete ? {
-                is_active: true,
-                months_completed: monthsCompleted,
-                months_remaining: 6 - monthsCompleted,
-                eligible_from_date: new Date(joiningDate.setMonth(joiningDate.getMonth() + 6)).toISOString().split('T')[0]
-            } : null
+            message: 'Leave request submitted successfully!',
+            leave: leaveData[0]
         });
 
     } catch (error) {
         console.error('❌ Error applying leave:', error);
-        console.error('Error stack:', error.stack);
         res.status(500).json({
             success: false,
             message: 'Failed to apply leave',
-            error: error.message,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            error: error.message
         });
     }
 };
 
-// Helper function to parse shift timing
-const parseShiftTiming = (shiftString) => {
-    if (!shiftString) {
-        return {
-            startHour: 9,
-            startMinute: 0,
-            endHour: 18,
-            endMinute: 0,
-            totalHours: 9
-        };
-    }
-
-    const parts = shiftString.split('-');
-    if (parts.length !== 2) {
-        return {
-            startHour: 9,
-            startMinute: 0,
-            endHour: 18,
-            endMinute: 0,
-            totalHours: 9
-        };
-    }
-
-    const startPart = parts[0].trim();
-    const endPart = parts[1].trim();
-
-    const parseTime = (timeStr) => {
-        const match = timeStr.match(/(\d+):(\d+)\s*(AM|PM)/i);
-        if (!match) return null;
-
-        let hour = parseInt(match[1]);
-        const minute = parseInt(match[2]);
-        const ampm = match[3].toUpperCase();
-
-        if (ampm === 'PM' && hour !== 12) hour += 12;
-        if (ampm === 'AM' && hour === 12) hour = 0;
-
-        return { hour, minute };
-    };
-
-    const startTime = parseTime(startPart);
-    const endTime = parseTime(endPart);
-
-    if (!startTime || !endTime) {
-        return {
-            startHour: 9,
-            startMinute: 0,
-            endHour: 18,
-            endMinute: 0,
-            totalHours: 9
-        };
-    }
-
-    let totalHours = endTime.hour - startTime.hour;
-    if (totalHours < 0) totalHours += 24;
-    totalHours += (endTime.minute - startTime.minute) / 60;
-
-    return {
-        startHour: startTime.hour,
-        startMinute: startTime.minute,
-        endHour: endTime.hour,
-        endMinute: endTime.minute,
-        totalHours: totalHours
-    };
-};
-
-// Validate half-day based on shift and working hours - 5 HOURS RULE
-const validateHalfDay = async (employee_id, leaveDate, halfDayType, shiftTiming) => {
-    try {
-        const date = new Date(leaveDate);
-        const year = date.getFullYear();
-        const month = date.getMonth() + 1;
-        const day = date.getDate();
-
-        const { data: attendance, error: attError } = await supabase
-            .from('attendance')
-            .select('*')
-            .eq('employee_id', employee_id)
-            .eq('attendance_date', leaveDate);
-
-        if (attError) throw attError;
-
-        let hoursWorked = 0;
-
-        if (attendance && attendance.length > 0) {
-            if (attendance[0].clock_in && attendance[0].clock_out) {
-                const clockInTime = new Date(attendance[0].clock_in);
-                const clockOutTime = new Date(attendance[0].clock_out);
-                hoursWorked = (clockOutTime - clockInTime) / (1000 * 60 * 60);
-            }
-        }
-
-        const totalShiftHours = shiftTiming.totalHours;
-        const MINIMUM_REQUIRED_HOURS = 5;
-
-        let requiredHours = 0;
-        let remainingHalf = '';
-
-        if (halfDayType === 'First Half') {
-            remainingHalf = 'Second Half';
-            requiredHours = MINIMUM_REQUIRED_HOURS;
-        } else if (halfDayType === 'Second Half') {
-            remainingHalf = 'First Half';
-            requiredHours = MINIMUM_REQUIRED_HOURS;
-        }
-
-        console.log('Half-day validation (5-hour rule):', {
-            halfDayType,
-            remainingHalf,
-            requiredHours: requiredHours.toFixed(1),
-            hoursWorked: hoursWorked.toFixed(1),
-            shiftTiming,
-            totalShiftHours: totalShiftHours.toFixed(1)
-        });
-
-        if (hoursWorked >= requiredHours) {
-            return {
-                valid: true,
-                message: `Valid half-day leave. You worked ${hoursWorked.toFixed(1)} hours in the ${remainingHalf} (minimum 5 hours required).`
-            };
-        } else {
-            return {
-                valid: false,
-                message: `Insufficient work hours. You only worked ${hoursWorked.toFixed(1)} hours in the ${remainingHalf}. Minimum 5 hours required for half-day.`
-            };
-        }
-
-    } catch (error) {
-        console.error('Error validating half-day:', error);
-        return {
-            valid: false,
-            message: 'Unable to validate work hours.'
-        };
-    }
-};
-
-// controllers/leaveController.js - COMPLETE FIX
+// ==================== GET ALL LEAVES ====================
 exports.getLeaves = async (req, res) => {
     try {
-        // IMPORTANT: Get the authenticated user from the token
         const authenticatedUserId = req.user?.employeeId;
         const userRole = req.user?.role;
 
-        console.log('📋 Fetching leaves - User:', {
-            employeeId: authenticatedUserId,
-            role: userRole
-        });
+        let query = supabase.from('leaves').select('*');
 
-        let query = supabase
-            .from('leaves')
-            .select('*');
-
-        // CRITICAL: Filter based on authenticated user
-        // Filter by employee_id unless admin explicitly requests all
         if (!(userRole === 'admin' && req.query.all === 'true')) {
             if (!authenticatedUserId) {
-                console.log('❌ No authenticated user ID found');
                 return res.json([]);
             }
-            console.log('👤 Filtering leaves for user:', authenticatedUserId);
             query = query.eq('employee_id', authenticatedUserId);
-        } else {
-            console.log('👑 Admin user - fetching all leaves');
-            // Optional: Filter by specific employee if provided in query
-            if (req.query.employee_id) {
-                query = query.eq('employee_id', req.query.employee_id);
-                console.log('📌 Filtering by specific employee:', req.query.employee_id);
-            }
+        } else if (req.query.employee_id) {
+            query = query.eq('employee_id', req.query.employee_id);
         }
 
         query = query.order('applied_date', { ascending: false });
 
         const { data: leaves, error } = await query;
 
-        if (error) {
-            console.error('❌ Database error:', error);
-            throw error;
-        }
+        if (error) throw error;
 
-        console.log(`✅ Found ${leaves?.length || 0} leaves for ${userRole === 'admin' ? 'admin' : `employee ${authenticatedUserId}`}`);
-
-        if (!leaves || leaves.length === 0) {
-            return res.json([]);
-        }
-
-        // Format leaves with employee details
-        const formattedLeaves = [];
-
-        for (const leave of leaves) {
-            try {
-                // Only fetch employee details if needed (for admin view)
-                if (userRole === 'admin') {
-                    const { data: employee, error: empError } = await supabase
-                        .from('employees')
-                        .select('first_name, last_name, department, designation')
-                        .eq('employee_id', leave.employee_id)
-                        .single();
-
-                    if (empError) {
-                        console.warn(`⚠️ Could not fetch employee details for ${leave.employee_id}:`, empError.message);
-                    }
-
-                    formattedLeaves.push({
-                        id: leave.id,
-                        employee_id: leave.employee_id,
-                        leave_type: leave.leave_type,
-                        leave_duration: leave.leave_duration,
-                        start_date: leave.start_date,
-                        end_date: leave.end_date,
-                        half_day_type: leave.half_day_type,
-                        reason: leave.reason,
-                        reporting_manager: leave.reporting_manager,
-                        status: leave.status,
-                        applied_date: leave.applied_date,
-                        days_count: leave.days_count,
-                        admin_comments: leave.admin_comments,
-                        created_at: leave.created_at,
-                        updated_at: leave.updated_at,
-                        first_name: employee?.first_name || '',
-                        last_name: employee?.last_name || '',
-                        department: employee?.department || '',
-                        designation: employee?.designation || ''
-                    });
-                } else {
-                    // For employee view, we don't need to fetch their own details again
-                    formattedLeaves.push({
-                        id: leave.id,
-                        employee_id: leave.employee_id,
-                        leave_type: leave.leave_type,
-                        leave_duration: leave.leave_duration,
-                        start_date: leave.start_date,
-                        end_date: leave.end_date,
-                        half_day_type: leave.half_day_type,
-                        reason: leave.reason,
-                        reporting_manager: leave.reporting_manager,
-                        status: leave.status,
-                        applied_date: leave.applied_date,
-                        days_count: leave.days_count,
-                        admin_comments: leave.admin_comments,
-                        created_at: leave.created_at,
-                        updated_at: leave.updated_at
-                    });
-                }
-            } catch (empErr) {
-                console.error(`❌ Error processing leave ${leave.id}:`, empErr);
-                formattedLeaves.push(leave);
-            }
-        }
-
-        res.json(formattedLeaves);
+        res.json(leaves || []);
 
     } catch (error) {
         console.error('❌ Error in getLeaves:', error);
@@ -557,13 +350,12 @@ exports.getLeaves = async (req, res) => {
     }
 };
 
+// ==================== UPDATE LEAVE STATUS ====================
 exports.updateLeaveStatus = async (req, res) => {
     try {
         const { id } = req.params;
         const { status, remarks } = req.body;
         const approver_id = req.user?.employeeId || req.body.approved_by;
-
-        console.log('📝 Updating leave status:', { id, status, remarks, approver_id });
 
         if (!status || !['approved', 'rejected', 'cancelled'].includes(status)) {
             return res.status(400).json({
@@ -572,75 +364,45 @@ exports.updateLeaveStatus = async (req, res) => {
             });
         }
 
-        // Get leave details first
         const { data: leave, error: fetchError } = await supabase
             .from('leaves')
-            .select('*, employees!inner(first_name, last_name)')
+            .select('*')
             .eq('id', id)
             .single();
 
-        if (fetchError) {
-            console.error('❌ Error fetching leave:', fetchError);
-            throw fetchError;
-        }
-
-        if (!leave) {
+        if (fetchError || !leave) {
             return res.status(404).json({
                 success: false,
                 message: 'Leave request not found'
             });
         }
 
-        console.log('📋 Found leave for employee:', leave.employee_id);
-
-        // Update only this specific leave record
         const updateData = {
             status: status,
             remarks: remarks || null,
             updated_at: new Date().toISOString()
         };
 
-        // Add approved_by if available
         if (approver_id) {
             updateData.approved_by = approver_id;
             updateData.approved_date = status === 'approved' ? new Date().toISOString().split('T')[0] : null;
         }
 
-        console.log('📝 Updating with data:', updateData);
-
-        // Update leave record
         const { data: updatedLeave, error: updateError } = await supabase
             .from('leaves')
             .update(updateData)
             .eq('id', id)
             .select();
 
-        if (updateError) {
-            console.error('❌ Error updating leave:', updateError);
-            throw updateError;
-        }
+        if (updateError) throw updateError;
 
-        console.log(`✅ Leave ${status} for employee ${leave.employee_id}:`, updatedLeave[0]);
-
-        // If comp-off leave is approved, deduct from balance
         if (status === 'approved' && leave.leave_type === 'Comp-Off') {
-            try {
-                const { error: updateError } = await supabase
-                    .from('employees')
-                    .update({
-                        comp_off_balance: supabase.raw('COALESCE(comp_off_balance, 0) - ?', [leave.days_count]),
-                        total_comp_off_used: supabase.raw('COALESCE(total_comp_off_used, 0) + ?', [leave.days_count])
-                    })
-                    .eq('employee_id', leave.employee_id);
-
-                if (updateError) {
-                    console.error('Error updating comp-off balance:', updateError);
-                } else {
-                    console.log('✅ Comp-Off balance updated');
-                }
-            } catch (compErr) {
-                console.error('Error in comp-off update:', compErr);
-            }
+            await supabase
+                .from('employees')
+                .update({
+                    comp_off_balance: supabase.raw('COALESCE(comp_off_balance, 0) - ?', [leave.days_count])
+                })
+                .eq('employee_id', leave.employee_id);
         }
 
         res.json({
@@ -651,7 +413,6 @@ exports.updateLeaveStatus = async (req, res) => {
 
     } catch (error) {
         console.error('❌ Error updating leave status:', error);
-        console.error('Error stack:', error.stack);
         res.status(500).json({
             success: false,
             message: 'Failed to update leave status',
@@ -660,7 +421,7 @@ exports.updateLeaveStatus = async (req, res) => {
     }
 };
 
-// Get leave types
+// ==================== GET LEAVE TYPES ====================
 exports.getLeaveTypes = async (req, res) => {
     try {
         const { employee_id } = req.query;
@@ -672,39 +433,39 @@ exports.getLeaveTypes = async (req, res) => {
         if (employee_id) {
             const { data: employee, error } = await supabase
                 .from('employees')
-                .select('comp_off_balance')
+                .select('comp_off_balance, joining_date')
                 .eq('employee_id', employee_id)
                 .single();
 
-            if (!error && employee.comp_off_balance > 0) {
-                availableTypes.unshift({
-                    value: 'Comp-Off',
-                    label: `Comp-Off (${employee.comp_off_balance} days available)`,
-                    icon: '🎉'
-                });
-            }
+            if (!error && employee) {
+                if (employee.comp_off_balance > 0) {
+                    availableTypes.unshift({
+                        value: 'Comp-Off',
+                        label: `Comp-Off (${employee.comp_off_balance} days available)`,
+                        icon: '🎉'
+                    });
+                }
 
-            const { data: empData } = await supabase
-                .from('employees')
-                .select('joining_date')
-                .eq('employee_id', employee_id)
-                .single();
+                if (employee.joining_date) {
+                    const joiningDate = new Date(employee.joining_date);
+                    const today = new Date();
+                    
+                    let totalMonths = (today.getFullYear() - joiningDate.getFullYear()) * 12 + 
+                                      (today.getMonth() - joiningDate.getMonth());
+                    if (today.getDate() < joiningDate.getDate()) {
+                        totalMonths = Math.max(0, totalMonths - 1);
+                    }
 
-            if (empData) {
-                const joiningDate = new Date(empData.joining_date);
-                const today = new Date();
-
-                const monthsCompleted = LeaveYearlyService.calculateCompletedMonthsFromJoining(joiningDate, today);
-
-                if (monthsCompleted >= 6) {
-                    availableTypes.push(
-                        { value: 'Annual', label: 'Annual Leave', icon: '🌴' },
-                        { value: 'Sick', label: 'Sick Leave', icon: '🤒' },
-                        { value: 'Personal', label: 'Personal Leave', icon: '👤' },
-                        { value: 'Maternity', label: 'Maternity Leave', icon: '🤱' },
-                        { value: 'Paternity', label: 'Paternity Leave', icon: '👨‍👧' },
-                        { value: 'Bereavement', label: 'Bereavement Leave', icon: '💐' }
-                    );
+                    if (totalMonths >= 6) {
+                        availableTypes.push(
+                            { value: 'Annual', label: 'Annual Leave', icon: '🌴' },
+                            { value: 'Sick', label: 'Sick Leave', icon: '🤒' },
+                            { value: 'Personal', label: 'Personal Leave', icon: '👤' },
+                            { value: 'Maternity', label: 'Maternity Leave', icon: '🤱' },
+                            { value: 'Paternity', label: 'Paternity Leave', icon: '👨‍👧' },
+                            { value: 'Bereavement', label: 'Bereavement Leave', icon: '💐' }
+                        );
+                    }
                 }
             }
         }
@@ -724,12 +485,62 @@ exports.getLeaveTypes = async (req, res) => {
     }
 };
 
-// Manual accrual for testing
+// ==================== MANUAL ACCRUAL ====================
 exports.manualAccrual = async (req, res) => {
     try {
         const { employee_id } = req.params;
-        const result = await LeaveYearlyService.addMonthlyAccrual(employee_id);
-        res.json(result);
+        
+        const { data: employee, error: empError } = await supabase
+            .from('employees')
+            .select('joining_date')
+            .eq('employee_id', employee_id)
+            .single();
+            
+        if (empError) throw empError;
+        
+        const joiningDate = new Date(employee.joining_date);
+        const today = new Date();
+        const currentYearAccrual = calculateCurrentYearAccruedLeaves(joiningDate, today);
+        const currentYear = today.getFullYear();
+        
+        const { data: existingBalance } = await supabase
+            .from('leave_balance')
+            .select('*')
+            .eq('employee_id', employee_id)
+            .eq('leave_year', currentYear)
+            .single();
+            
+        if (existingBalance) {
+            await supabase
+                .from('leave_balance')
+                .update({
+                    total_accrued: currentYearAccrual,
+                    current_balance: currentYearAccrual - (existingBalance.total_used || 0),
+                    last_updated: today.toISOString()
+                })
+                .eq('employee_id', employee_id)
+                .eq('leave_year', currentYear);
+        } else {
+            await supabase
+                .from('leave_balance')
+                .insert([{
+                    employee_id,
+                    leave_year: currentYear,
+                    total_accrued: currentYearAccrual,
+                    total_used: 0,
+                    total_pending: 0,
+                    current_balance: currentYearAccrual,
+                    last_updated: today.toISOString()
+                }]);
+        }
+        
+        res.json({
+            success: true,
+            message: `Manual accrual updated: ${currentYearAccrual} days`,
+            total_accrued: currentYearAccrual,
+            completed_months: getCompletedMonthsInCurrentYear(joiningDate, today)
+        });
+        
     } catch (error) {
         console.error('Error in manual accrual:', error);
         res.status(500).json({
@@ -740,11 +551,60 @@ exports.manualAccrual = async (req, res) => {
     }
 };
 
-// Yearly reset (admin only)
+// ==================== YEARLY RESET ====================
 exports.yearlyReset = async (req, res) => {
     try {
-        const result = await LeaveYearlyService.resetAllForNewYear();
-        res.json(result);
+        const nextYear = new Date().getFullYear() + 1;
+        
+        const { data: employees } = await supabase
+            .from('employees')
+            .select('employee_id, joining_date');
+            
+        if (employees) {
+            for (const emp of employees) {
+                const joiningDate = new Date(emp.joining_date);
+                const today = new Date(nextYear, 0, 1);
+                
+                let accruedMonths = 0;
+                const joinYear = joiningDate.getFullYear();
+                
+                if (joinYear <= nextYear) {
+                    for (let month = 0; month < 12; month++) {
+                        accruedMonths++;
+                    }
+                }
+                
+                const accrualAmount = accruedMonths * 1.5;
+                
+                const { data: existing } = await supabase
+                    .from('leave_balance')
+                    .select('id')
+                    .eq('employee_id', emp.employee_id)
+                    .eq('leave_year', nextYear)
+                    .single();
+                    
+                if (!existing) {
+                    await supabase
+                        .from('leave_balance')
+                        .insert([{
+                            employee_id: emp.employee_id,
+                            leave_year: nextYear,
+                            total_accrued: accrualAmount,
+                            total_used: 0,
+                            total_pending: 0,
+                            current_balance: accrualAmount,
+                            last_updated: new Date().toISOString()
+                        }]);
+                }
+            }
+        }
+        
+        res.json({
+            success: true,
+            message: `Yearly reset completed for ${nextYear}`,
+            year: nextYear
+        });
+        
     } catch (error) {
         console.error('Error in yearly reset:', error);
         res.status(500).json({
@@ -753,56 +613,6 @@ exports.yearlyReset = async (req, res) => {
             error: error.message
         });
     }
-};
-
-// In leaveController.js - Updated getLeaveBalance function
-
-// Get current year's completed months (FIXED)
-const getCurrentYearCompletedMonths = (joiningDate, currentDate = new Date()) => {
-    const today = new Date(currentDate);
-    const currentYear = today.getFullYear();
-    const join = new Date(joiningDate);
-
-    // For employees who joined this year
-    if (join.getFullYear() === currentYear) {
-        // Count completed months (full months after joining)
-        let completedMonths = 0;
-        const currentMonth = today.getMonth();
-        const joinMonth = join.getMonth();
-        const joinDay = join.getDate();
-
-        // A month is considered completed when:
-        // Example: Joined March 2, 2026
-        // - March 2-31: Month 0 (not completed)
-        // - April 1: Still month 0 (need to complete full April to get March)
-        // - May 1: Now March is completed? Actually March is joining month, so first accrual is for April on May 1
-
-        for (let month = joinMonth + 1; month <= currentMonth; month++) {
-            if (month < currentMonth) {
-                // Past months are fully completed
-                completedMonths++;
-            } else if (month === currentMonth) {
-                // For current month, check if we've completed it
-                // We complete a month when we reach the same day of next month
-                if (today.getDate() >= joinDay) {
-                    completedMonths++;
-                }
-            }
-        }
-
-        return Math.max(0, completedMonths);
-    }
-
-    // For employees joined in previous years
-    let completedMonths = 0;
-    for (let month = 0; month <= today.getMonth(); month++) {
-        if (month < today.getMonth()) {
-            completedMonths++;
-        } else if (month === today.getMonth() && today.getDate() >= 1) {
-            completedMonths++;
-        }
-    }
-    return Math.max(0, completedMonths);
 };
 
 module.exports = exports;

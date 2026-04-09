@@ -6,19 +6,21 @@ async function initializeLeaveBalances() {
     console.log('🔄 LEAVE BALANCE INITIALIZATION STARTED');
     console.log('='.repeat(70));
     
-    try {
-        // Get all employees
+     try {
+        // Get all employees - use employee_status instead of status
         const { data: employees, error: empError } = await supabase
             .from('employees')
-            .select('employee_id, joining_date, first_name, last_name');
+            .select('employee_id, joining_date, first_name, last_name, employee_status');
 
         if (empError) throw empError;
 
-        console.log(`📊 Found ${employees?.length || 0} employees`);
+         const activeEmployees = employees.filter(emp => emp.employee_status === 'Active');
+
+        console.log(`📊 Found ${activeEmployees?.length || 0} active employees (out of ${employees?.length || 0} total)`);
         console.log('='.repeat(70));
 
-        const results = {
-            total: employees?.length || 0,
+          const results = {
+            total: activeEmployees?.length || 0,
             created: 0,
             updated: 0,
             failed: 0,
@@ -26,6 +28,7 @@ async function initializeLeaveBalances() {
         };
 
         const currentYear = new Date().getFullYear();
+
 
         for (const emp of employees || []) {
             try {
