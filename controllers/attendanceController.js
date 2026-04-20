@@ -167,6 +167,62 @@ const isHoliday = (date) => {
     return { isHoliday: false };
 };
 
+// Recalculate late marks from clock_in_ist and shift_timing
+const recalculateLate = (clockInIst, clockIn, shiftTiming, attendanceDate) => {
+    const clockInValue = clockInIst || clockIn;
+    if (!clockInValue) return { late_minutes: 0, late_display: null, is_late: false };
+
+    let clockInTime;
+    if (typeof clockInValue === 'string' && clockInValue.includes(' ')) {
+        const [dp, tp] = clockInValue.split(' ');
+        const [y, mo, d] = dp.split('-');
+        const [h, mi, s] = tp.split(':');
+        clockInTime = new Date(+y, +mo - 1, +d, +h, +mi, +(s || 0));
+    } else {
+        clockInTime = new Date(clockInValue);
+    }
+    if (!clockInTime || isNaN(clockInTime.getTime())) return { late_minutes: 0, late_display: null, is_late: false };
+
+    let shiftHour = 9, shiftMinute = 0;
+    if (shiftTiming) {
+        let s = shiftTiming.trim();
+        if (s.includes('-')) s = s.split('-')[0].trim();
+        const m = s.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+        if (m) {
+            let h = parseInt(m[1]);
+            const ampm = m[3].toUpperCase();
+            if (ampm === 'PM' && h !== 12) h += 12;
+            if (ampm === 'AM' && h === 12) h = 0;
+            shiftHour = h; shiftMinute = parseInt(m[2]);
+        } else {
+            const m2 = s.match(/(\d{1,2}):(\d{2})/);
+            if (m2) { shiftHour = parseInt(m2[1]); shiftMinute = parseInt(m2[2]); }
+        }
+    }
+
+    const attDate = new Date(attendanceDate);
+    const shiftStart = new Date(attDate.getFullYear(), attDate.getMonth(), attDate.getDate(), shiftHour, shiftMinute, 0, 0);
+    const diffMs = clockInTime - shiftStart;
+    if (diffMs <= 0) return { late_minutes: 0, late_display: null, is_late: false };
+
+    const lateMinutes = diffMs / (1000 * 60);
+    const totalSeconds = Math.floor(diffMs / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const remainingSeconds = totalSeconds % 3600;
+    const minutes = Math.floor(remainingSeconds / 60);
+    const seconds = remainingSeconds % 60;
+    const parts = [];
+    if (hours > 0) parts.push(`${hours}h`);
+    if (minutes > 0) parts.push(`${minutes}m`);
+    if (seconds > 0 || (hours === 0 && minutes === 0)) parts.push(`${seconds}s`);
+
+    return {
+        late_minutes: parseFloat(lateMinutes.toFixed(4)),
+        late_display: parts.join(' '),
+        is_late: true
+    };
+};
+
 // Format late time for display
 const formatLateTime = (lateMinutes) => {
     if (!lateMinutes || lateMinutes <= 0) return null;
@@ -251,13 +307,14 @@ exports.autoCloseStaleSessions = async () => {
     }
 };
 
-// Clock In function
+// Clock In function - ENHANCED for consistent late calculation
 exports.clockIn = async (req, res) => {
     try {
         const { employee_id, latitude, longitude, accuracy } = req.body;
         if (!employee_id) {
             return res.status(400).json({ success: false, message: 'Employee ID is required' });
         }
+        
         const { data: employees } = await supabase
             .from('employees')
             .select('*')
@@ -324,38 +381,79 @@ exports.clockIn = async (req, res) => {
         const sessionId = generateSessionId();
         const holidayCheck = isHoliday(now);
 
-        // Get shift timing
+        // ✅ ENHANCED: Better shift timing parsing with fallback
         let shiftHour = 9, shiftMinute = 0;
-        let shiftDisplay = emp.shift_timing || '9:00 AM';
+        let shiftDisplay = emp.shift_timing || '9:00 AM - 6:00 PM';
+        
+        console.log(`🔍 Processing shift timing for ${employee_id}: "${emp.shift_timing}"`);
 
         if (emp.shift_timing) {
-            let startTimeStr = emp.shift_timing;
+            let startTimeStr = emp.shift_timing.trim();
+            
+            // Extract start time from shift range (e.g., "9:00 AM - 6:00 PM")
             if (startTimeStr.includes('-')) {
                 startTimeStr = startTimeStr.split('-')[0].trim();
             }
+            
+            console.log(`🔍 Extracted start time: "${startTimeStr}"`);
 
-            const timeMatch = startTimeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-            if (timeMatch) {
-                let hour = parseInt(timeMatch[1]);
-                const minute = parseInt(timeMatch[2]);
-                const ampm = timeMatch[3].toUpperCase();
-
+            // Try multiple parsing patterns
+            let parsed = false;
+            
+            // Pattern 1: "9:00 AM" or "3:00 PM"
+            const ampmMatch = startTimeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+            if (ampmMatch) {
+                let hour = parseInt(ampmMatch[1]);
+                const minute = parseInt(ampmMatch[2]);
+                const ampm = ampmMatch[3].toUpperCase();
+                
                 if (ampm === 'PM' && hour !== 12) hour += 12;
                 if (ampm === 'AM' && hour === 12) hour = 0;
+                
                 shiftHour = hour;
                 shiftMinute = minute;
-            } else {
+                parsed = true;
+                console.log(`✅ Parsed AM/PM format: ${hour}:${minute} (${ampm})`);
+            }
+            
+            // Pattern 2: "15:00" (24-hour format)
+            if (!parsed) {
                 const militaryMatch = startTimeStr.match(/(\d{1,2}):(\d{2})/);
                 if (militaryMatch) {
                     shiftHour = parseInt(militaryMatch[1]);
                     shiftMinute = parseInt(militaryMatch[2]);
+                    parsed = true;
+                    console.log(`✅ Parsed 24-hour format: ${shiftHour}:${shiftMinute}`);
                 }
+            }
+            
+            // Pattern 3: Just hour "9" or "15"
+            if (!parsed) {
+                const hourMatch = startTimeStr.match(/^(\d{1,2})$/);
+                if (hourMatch) {
+                    shiftHour = parseInt(hourMatch[1]);
+                    shiftMinute = 0;
+                    parsed = true;
+                    console.log(`✅ Parsed hour only: ${shiftHour}:00`);
+                }
+            }
+            
+            if (!parsed) {
+                console.log(`⚠️ Could not parse shift timing "${startTimeStr}", using default 9:00 AM`);
+                shiftHour = 9;
+                shiftMinute = 0;
             }
         }
 
+        // Create shift start time for today
         const shiftStartTime = new Date(year, now.getMonth(), now.getDate(), shiftHour, shiftMinute, 0, 0);
+        
+        console.log(`⏰ Shift start time: ${shiftStartTime.toLocaleString()}`);
+        console.log(`⏰ Clock in time: ${now.toLocaleString()}`);
+
+        // ✅ FIXED: Consistent late calculation - ANY delay after shift time is late
         const diffMs = now - shiftStartTime;
-        const isLate = diffMs > 0;
+        const isLate = diffMs > 0; // No grace period - any delay is late
         const isEarly = diffMs < 0;
 
         let lateMinutes = 0, earlyMinutes = 0;
@@ -363,23 +461,30 @@ exports.clockIn = async (req, res) => {
 
         if (isLate) {
             lateMinutes = diffMs / (1000 * 60);
-            const totalSeconds = Math.floor(lateMinutes * 60);
-            const minutes = Math.floor(totalSeconds / 60);
-            const seconds = totalSeconds % 60;
+            
+            // ✅ ENHANCED: More accurate seconds calculation
+            const totalSeconds = Math.floor(diffMs / 1000);
+            const hours = Math.floor(totalSeconds / 3600);
+            const remainingSeconds = totalSeconds % 3600;
+            const minutes = Math.floor(remainingSeconds / 60);
+            const seconds = remainingSeconds % 60;
 
-            if (minutes === 0) {
-                lateDisplay = `${seconds}s`;
-            } else if (seconds === 0) {
-                lateDisplay = `${minutes}m`;
-            } else {
-                lateDisplay = `${minutes}m ${seconds}s`;
-            }
+            const parts = [];
+            if (hours > 0) parts.push(`${hours}h`);
+            if (minutes > 0) parts.push(`${minutes}m`);
+            if (seconds > 0 || (hours === 0 && minutes === 0)) parts.push(`${seconds}s`);
+            lateDisplay = parts.join(' ');
+
+            console.log(`⚠️ LATE: ${lateDisplay} (${lateMinutes.toFixed(2)} minutes)`);
         } else if (isEarly) {
             earlyMinutes = Math.abs(diffMs) / (1000 * 60);
+            console.log(`⏰ EARLY: ${earlyMinutes.toFixed(2)} minutes`);
+        } else {
+            console.log(`✅ ON TIME`);
         }
 
-        const lateMinutesToSave = isLate ? parseFloat(lateMinutes.toFixed(2)) : 0;
-        const earlyMinutesToSave = isEarly ? parseFloat(earlyMinutes.toFixed(2)) : 0;
+        const lateMinutesToSave = isLate ? parseFloat(lateMinutes.toFixed(4)) : 0; // More precision
+        const earlyMinutesToSave = isEarly ? parseFloat(earlyMinutes.toFixed(4)) : 0;
 
         // Check for existing attendance
         const { data: existingAttendance } = await supabase
@@ -408,24 +513,37 @@ exports.clockIn = async (req, res) => {
         const istDateStr = `${istYear}-${istMonth.padStart(2, '0')}-${istDay.padStart(2, '0')}`;
         const clockInIST = `${istDateStr} ${timePart}`;
 
+        // ✅ ENHANCED: Always store late information if late
+        const attendanceData = {
+            employee_id,
+            attendance_date: today,
+            clock_in: now.toISOString(),
+            clock_in_ist: clockInIST,
+            late_minutes: lateMinutesToSave,
+            late_display: lateDisplay,
+            early_minutes: earlyMinutesToSave,
+            latitude: latitude || null,
+            longitude: longitude || null,
+            location_accuracy: accuracy || null,
+            session_id: sessionId,
+            shift_time_used: shiftDisplay,
+            is_holiday: holidayCheck.isHoliday,
+            holiday_name: holidayCheck.name || null,
+            status: isLate ? 'late' : 'present'
+        };
+        
+        console.log(`💾 Saving attendance data:`, {
+            employee_id,
+            late_minutes: lateMinutesToSave,
+            late_display: lateDisplay,
+            is_late: isLate,
+            shift_used: shiftDisplay
+        });
+
         // Insert attendance record
         const { data: insertedAttendance, error: insertError } = await supabase
             .from('attendance')
-            .insert([{
-                employee_id,
-                attendance_date: today,
-                clock_in: now.toISOString(),
-                clock_in_ist: clockInIST,
-                late_minutes: lateMinutesToSave,
-                early_minutes: earlyMinutesToSave,
-                latitude: latitude || null,
-                longitude: longitude || null,
-                location_accuracy: accuracy || null,
-                session_id: sessionId,
-                shift_time_used: shiftDisplay,
-                is_holiday: holidayCheck.isHoliday,
-                holiday_name: holidayCheck.name || null
-            }])
+            .insert([attendanceData])
             .select();
 
         if (insertError) {
@@ -465,6 +583,12 @@ exports.clockIn = async (req, res) => {
             attendance_date: today,
             is_holiday: holidayCheck.isHoliday
         };
+
+        console.log(`✅ Clock-in successful for ${employee_id}:`, {
+            is_late: isLate,
+            late_display: lateDisplay,
+            late_minutes: lateMinutesToSave
+        });
 
         res.json(response);
 
@@ -669,10 +793,14 @@ exports.getTodayAttendance = async (req, res) => {
         if (!employee_id) return res.status(400).json({ success: false, message: 'Employee ID is required' });
         const now = new Date();
         const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+        
+        // Get employee details first
         const { data: employees } = await supabase.from('employees').select('*').eq('employee_id', employee_id);
         if (!employees || employees.length === 0) {
             return res.status(404).json({ success: false, message: 'Employee not found' });
         }
+        const employee = employees[0];
+        
         const { data: todayAttendance } = await supabase
             .from('attendance')
             .select('*, employees!inner(first_name, last_name, shift_timing, comp_off_balance)')
@@ -694,10 +822,139 @@ exports.getTodayAttendance = async (req, res) => {
                 formattedAttendance.shift_timing = formattedAttendance.employees.shift_timing;
                 delete formattedAttendance.employees;
             }
-            if (formattedAttendance.late_minutes > 0) {
-                formattedAttendance.late_display = formatLateTime(formattedAttendance.late_minutes);
-            }
+            
+            // ✅ ENHANCED: Always recalculate late marks in real-time
+            if (formattedAttendance.clock_in || formattedAttendance.clock_in_ist) {
+                // Parse clock in time
+                let clockInTime;
+                const clockInValue = formattedAttendance.clock_in_ist || formattedAttendance.clock_in;
+                
+                if (clockInValue && typeof clockInValue === 'string' && clockInValue.includes(' ')) {
+                    const [datePart, timePart] = clockInValue.split(' ');
+                    const [year, month, day] = datePart.split('-');
+                    const [hour, minute, second] = timePart.split(':');
+                    clockInTime = new Date(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hour), parseInt(minute), parseInt(second || 0));
+                } else {
+                    clockInTime = new Date(clockInValue);
+                }
 
+                if (clockInTime && !isNaN(clockInTime.getTime())) {
+                    // Parse shift timing
+                    let shiftHour = 9, shiftMinute = 0;
+                    const shiftString = employee.shift_timing || formattedAttendance.shift_time_used;
+                    
+                    if (shiftString) {
+                        let startTimeStr = shiftString.trim();
+                        
+                        if (startTimeStr.includes('-')) {
+                            startTimeStr = startTimeStr.split('-')[0].trim();
+                        }
+                        
+                        let parsed = false;
+                        
+                        // Pattern 1: "9:00 AM" or "3:00 PM"
+                        const ampmMatch = startTimeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+                        if (ampmMatch) {
+                            let hour = parseInt(ampmMatch[1]);
+                            const minute = parseInt(ampmMatch[2]);
+                            const ampm = ampmMatch[3].toUpperCase();
+                            
+                            if (ampm === 'PM' && hour !== 12) hour += 12;
+                            if (ampm === 'AM' && hour === 12) hour = 0;
+                            
+                            shiftHour = hour;
+                            shiftMinute = minute;
+                            parsed = true;
+                        }
+                        
+                        // Pattern 2: "15:00" (24-hour format)
+                        if (!parsed) {
+                            const militaryMatch = startTimeStr.match(/(\d{1,2}):(\d{2})/);
+                            if (militaryMatch) {
+                                shiftHour = parseInt(militaryMatch[1]);
+                                shiftMinute = parseInt(militaryMatch[2]);
+                                parsed = true;
+                            }
+                        }
+                        
+                        // Pattern 3: Just hour "9" or "15"
+                        if (!parsed) {
+                            const hourMatch = startTimeStr.match(/^(\d{1,2})$/);
+                            if (hourMatch) {
+                                shiftHour = parseInt(hourMatch[1]);
+                                shiftMinute = 0;
+                                parsed = true;
+                            }
+                        }
+                    }
+
+                    // Create shift start time for today
+                    const attendanceDate = new Date(formattedAttendance.attendance_date);
+                    const shiftStartTime = new Date(
+                        attendanceDate.getFullYear(),
+                        attendanceDate.getMonth(),
+                        attendanceDate.getDate(),
+                        shiftHour,
+                        shiftMinute,
+                        0,
+                        0
+                    );
+
+                    // Calculate late time
+                    const diffMs = clockInTime - shiftStartTime;
+                    const isLate = diffMs > 0;
+                    
+                    let lateMinutes = 0;
+                    let lateDisplay = null;
+
+                    if (isLate) {
+                        lateMinutes = diffMs / (1000 * 60);
+                        
+                        // Format late display
+                        const totalSeconds = Math.floor(diffMs / 1000);
+                        const hours = Math.floor(totalSeconds / 3600);
+                        const remainingSeconds = totalSeconds % 3600;
+                        const minutes = Math.floor(remainingSeconds / 60);
+                        const seconds = remainingSeconds % 60;
+
+                        const parts = [];
+                        if (hours > 0) parts.push(`${hours}h`);
+                        if (minutes > 0) parts.push(`${minutes}m`);
+                        if (seconds > 0 || (hours === 0 && minutes === 0)) parts.push(`${seconds}s`);
+                        lateDisplay = parts.join(' ');
+                    }
+
+                    // Update the formatted attendance with calculated values
+                    formattedAttendance.late_minutes = isLate ? parseFloat(lateMinutes.toFixed(4)) : 0;
+                    formattedAttendance.late_display = lateDisplay;
+                    formattedAttendance.is_late = isLate;
+                    
+                    console.log(`📊 Real-time late calculation for ${employee_id}:`, {
+                        shift_start: `${shiftHour}:${shiftMinute.toString().padStart(2, '0')}`,
+                        clock_in: clockInTime.toLocaleString(),
+                        late_minutes: formattedAttendance.late_minutes,
+                        late_display: formattedAttendance.late_display,
+                        is_late: formattedAttendance.is_late
+                    });
+                    
+                    // Update database if values have changed significantly
+                    const storedLateMinutes = parseFloat(todayAttendance[0].late_minutes) || 0;
+                    const needsUpdate = Math.abs(storedLateMinutes - formattedAttendance.late_minutes) > 0.01 || 
+                                       todayAttendance[0].late_display !== formattedAttendance.late_display;
+                    
+                    if (needsUpdate) {
+                        console.log(`🔄 Updating attendance record ${todayAttendance[0].id} with correct late marks`);
+                        await supabase
+                            .from('attendance')
+                            .update({
+                                late_minutes: formattedAttendance.late_minutes,
+                                late_display: formattedAttendance.late_display
+                            })
+                            .eq('id', todayAttendance[0].id);
+                    }
+                }
+            }
+            
             if (formattedAttendance.clock_in_ist && !formattedAttendance.clock_out_ist) {
                 const clockInTime = parseLocalDateTimeIST(formattedAttendance.clock_in_ist);
                 const nowDate = new Date();
@@ -712,9 +969,6 @@ exports.getTodayAttendance = async (req, res) => {
 
             formattedAttendance.clock_in = formattedAttendance.clock_in_ist || formattedAttendance.clock_in;
             formattedAttendance.clock_out = formattedAttendance.clock_out_ist || formattedAttendance.clock_out;
-            formattedAttendance.late_minutes = Number(formattedAttendance.late_minutes) || 0;
-            formattedAttendance.late_display = formattedAttendance.late_display || (formattedAttendance.late_minutes > 0 ? formatLateTime(formattedAttendance.late_minutes) : null);
-            formattedAttendance.is_late = formattedAttendance.late_minutes > 0;
 
             if (!formattedAttendance.status) {
                 if (formattedAttendance.clock_in && !formattedAttendance.clock_out) {
@@ -779,11 +1033,11 @@ exports.getAttendanceReport = async (req, res) => {
                 const totalMinutes = record.total_hours * 60;
                 totalHoursDisplay = `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`;
             }
-            let lateDisplay = null;
-            if (record.late_minutes && record.late_minutes > 0) {
-                lateDisplay = formatLateTime(parseFloat(record.late_minutes));
-            }
-            const isLate = record.late_minutes && parseFloat(record.late_minutes) > 0;
+
+            // Always recalculate late from clock_in_ist + shift_timing (fixes DB inconsistency)
+            const shiftTiming = employee.shift_timing || record.shift_time_used;
+            const late = recalculateLate(record.clock_in_ist, record.clock_in, shiftTiming, record.attendance_date);
+
             let status = record.status;
             if (!status) {
                 if (record.clock_in && !record.clock_out) status = 'working';
@@ -800,9 +1054,9 @@ exports.getAttendanceReport = async (req, res) => {
                 total_minutes: record.total_minutes,
                 total_hours_display: totalHoursDisplay,
                 status: status,
-                is_late: isLate,
-                late_minutes: record.late_minutes ? parseFloat(record.late_minutes) : 0,
-                late_display: record.late_display || (isLate ? formatLateTime(parseFloat(record.late_minutes)) : null),
+                is_late: late.is_late,
+                late_minutes: late.late_minutes,
+                late_display: late.late_display,
                 early_minutes: record.early_minutes,
                 shift_time_used: record.shift_time_used,
                 is_holiday: record.is_holiday,
@@ -1062,106 +1316,126 @@ exports.requestRegularization = async (req, res) => {
 
 exports.approveRegularization = async (req, res) => {
     try {
-        const { request_id } = req.params;
+        const { id } = req.params;
         const { approved_clock_out_time, admin_notes } = req.body;
+        const approver_id = req.user?.employeeId;
 
-        console.log('='.repeat(70));
-        console.log('🔄 APPROVING REGULARIZATION REQUEST');
-        console.log('Request ID (from params):', request_id);
-        console.log('Request ID type:', typeof request_id);
-        console.log('='.repeat(70));
-
-        if (!request_id) {
-            return res.status(400).json({ success: false, message: 'Request ID is required' });
-        }
+        console.log('📝 Approving regularization:', { id, approved_clock_out_time, admin_notes, approver_id });
 
         if (!approved_clock_out_time) {
-            return res.status(400).json({ success: false, message: 'Clock-out time is required' });
+            return res.status(400).json({
+                success: false,
+                message: 'Approved clock out time is required'
+            });
         }
 
-        // ✅ WORKAROUND: Try to fetch by UUID first, if that fails, try by numeric ID
-        let request = null;
-        let reqError = null;
-        
-        // Try as UUID first
-        try {
-            const result = await supabase
-                .from('regularization_requests')
-                .select('*')
-                .eq('id', request_id)
-                .maybeSingle();
-            
-            if (result.data) {
-                request = result.data;
-            } else {
-                // Try as integer (convert to number)
-                const numericId = parseInt(request_id);
-                if (!isNaN(numericId)) {
-                    const intResult = await supabase
-                        .from('regularization_requests')
-                        .select('*')
-                        .eq('id', numericId)
-                        .maybeSingle();
-                    
-                    if (intResult.data) {
-                        request = intResult.data;
-                        console.log('✅ Found request using numeric ID:', numericId);
-                    }
-                }
-            }
-            reqError = result.error;
-        } catch (err) {
-            reqError = err;
-        }
+        // Get the regularization request
+        const { data: request, error: fetchError } = await supabase
+            .from('regularization_requests')
+            .select('*')
+            .eq('id', id)
+            .single();
 
-        if (!request) {
-            console.error('❌ Request not found for ID:', request_id);
+        if (fetchError || !request) {
             return res.status(404).json({
                 success: false,
                 message: 'Regularization request not found'
             });
         }
 
-        console.log('✅ Request found:', {
-            id: request.id,
-            id_type: typeof request.id,
-            status: request.status,
-            employee_id: request.employee_id,
-            attendance_id: request.attendance_id
-        });
+        if (request.status !== 'pending') {
+            return res.status(400).json({
+                success: false,
+                message: `Request already ${request.status}`
+            });
+        }
 
-        // Rest of your code remains the same...
-        // ... (keep all the rest of your approveRegularization code)
-        
-        // ✅ When updating, use the actual id from the request object
-        const requestIdToUpdate = request.id; // This is the actual ID from the database
-        
-        console.log('Updating regularization request with ID:', requestIdToUpdate);
-        console.log('ID type for update:', typeof requestIdToUpdate);
-        
+        // Convert approved_clock_out_time to proper format and calculate IST
+        let clockOutTime = new Date(approved_clock_out_time);
+
+        // Calculate IST time (same as in clockOut function)
+        const istOffset = 5.5 * 60 * 60 * 1000;
+        const istTime = new Date(clockOutTime.getTime() + istOffset);
+        const istDateStr = istTime.toISOString().split('T')[0];
+        const istTimeStr = istTime.toISOString().split('T')[1].split('.')[0];
+        const clockOutIST = `${istDateStr} ${istTimeStr}`;
+
+        // Get clock in time from the request
+        let clockInTime = new Date(request.clock_in_time);
+
+        // Calculate total hours worked
+        const totalHours = (clockOutTime - clockInTime) / (1000 * 60 * 60);
+        const totalMinutes = Math.round((clockOutTime - clockInTime) / (1000 * 60));
+
+        // Calculate late minutes if any (assuming shift starts at 9:30 AM or as per employee shift)
+        const shiftStartHour = 9;
+        const shiftStartMinute = 30;
+        const shiftStartTime = new Date(clockInTime);
+        shiftStartTime.setHours(shiftStartHour, shiftStartMinute, 0, 0);
+
+        let lateMinutes = 0;
+        if (clockInTime > shiftStartTime) {
+            lateMinutes = Math.round((clockInTime - shiftStartTime) / (1000 * 60));
+        }
+
+        // Update attendance by attendance_id (from request) or fallback to employee+date
+        let attendanceUpdateQuery = supabase
+            .from('attendance')
+            .update({
+                clock_out: clockOutTime.toISOString(),
+                clock_out_ist: clockOutIST,
+                total_hours: parseFloat(totalHours.toFixed(2)),
+                total_minutes: totalMinutes,
+                total_hours_display: `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`,
+                status: 'present',
+                is_regularized: true,
+                regularization_approved: true,
+                regularization_approved_by: approver_id,
+                regularization_approved_at: new Date().toISOString(),
+                admin_notes: admin_notes || null
+            });
+
+        if (request.attendance_id) {
+            attendanceUpdateQuery = attendanceUpdateQuery.eq('id', request.attendance_id);
+        } else {
+            attendanceUpdateQuery = attendanceUpdateQuery
+                .eq('employee_id', request.employee_id)
+                .eq('attendance_date', request.attendance_date);
+        }
+
+        const { error: updateError } = await attendanceUpdateQuery;
+        if (updateError) throw updateError;
+
+        // Update the regularization request status
         const { error: requestUpdateError } = await supabase
             .from('regularization_requests')
             .update({
                 status: 'approved',
-                approved_clock_out_time: clockOutIST,
-                approved_by: req.user?.id || null,
+                approved_by: approver_id,
                 approved_at: new Date().toISOString(),
+                approved_clock_out_time: clockOutTime.toISOString(),
                 admin_notes: admin_notes || null
             })
-            .eq('id', requestIdToUpdate);  // ✅ Use the ID from the request object
+            .eq('id', id);
 
-        if (requestUpdateError) {
-            console.error('❌ Error updating request status:', requestUpdateError);
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to update request status',
-                error: requestUpdateError.message
-            });
-        }
+        if (requestUpdateError) throw requestUpdateError;
 
-        // ... rest of your code
+        console.log('✅ Regularization approved successfully');
+
+        res.json({
+            success: true,
+            message: 'Regularization request approved successfully',
+            data: {
+                attendance_date: request.attendance_date,
+                clock_in_time: request.clock_in_time,
+                approved_clock_out_time: clockOutIST,
+                total_hours: totalHours.toFixed(2),
+                total_minutes: totalMinutes
+            }
+        });
+
     } catch (error) {
-        console.error('❌ Error in approveRegularization:', error);
+        console.error('❌ Error approving regularization:', error);
         res.status(500).json({
             success: false,
             message: 'Failed to approve regularization',
@@ -1170,61 +1444,65 @@ exports.approveRegularization = async (req, res) => {
     }
 };
 
-// ✅ FIXED rejectRegularization
+// Reject regularization request
 exports.rejectRegularization = async (req, res) => {
     try {
-        const { request_id } = req.params;
+        const { id } = req.params;
         const { rejection_reason } = req.body;
+        const approver_id = req.user?.employeeId;
 
-        if (!request_id) {
-            return res.status(400).json({ success: false, message: 'Request ID is required' });
+        console.log('📝 Rejecting regularization:', { id, rejection_reason, approver_id });
+
+        if (!rejection_reason) {
+            return res.status(400).json({
+                success: false,
+                message: 'Rejection reason is required'
+            });
         }
 
-        // Fetch request (UUID)
-        const { data: request, error: reqError } = await supabase
+        // Get the regularization request
+        const { data: request, error: fetchError } = await supabase
             .from('regularization_requests')
             .select('*')
-            .eq('id', request_id)
+            .eq('id', id)
             .single();
 
-        if (reqError || !request) {
-            console.error('Request not found:', request_id, reqError?.message);
+        if (fetchError || !request) {
             return res.status(404).json({
                 success: false,
                 message: 'Regularization request not found'
             });
         }
 
-        // Update attendance
-        const { error: attError } = await supabase
-            .from('attendance')
-            .update({
-                regularization_status: 'rejected',
-                regularization_rejection_reason: rejection_reason || 'No reason provided'
-            })
-            .eq('id', request.attendance_id);
+        if (request.status !== 'pending') {
+            return res.status(400).json({
+                success: false,
+                message: `Request already ${request.status}`
+            });
+        }
 
-        if (attError) throw attError;
-
-        // Update regularization request
-        const { error: requestError } = await supabase
+        // Update the regularization request status
+        const { error: requestUpdateError } = await supabase
             .from('regularization_requests')
             .update({
                 status: 'rejected',
-                rejection_reason: rejection_reason || 'No reason provided',
-                rejected_at: new Date().toISOString(),
-                rejected_by: req.user?.id
+                approved_by: approver_id,
+                approved_at: new Date().toISOString(),
+                rejection_reason: rejection_reason
             })
-            .eq('id', request_id);
+            .eq('id', id);
 
-        if (requestError) throw requestError;
+        if (requestUpdateError) throw requestUpdateError;
+
+        console.log('✅ Regularization rejected successfully');
 
         res.json({
             success: true,
             message: 'Regularization request rejected successfully'
         });
+
     } catch (error) {
-        console.error('Error rejecting regularization:', error);
+        console.error('❌ Error rejecting regularization:', error);
         res.status(500).json({
             success: false,
             message: 'Failed to reject regularization',
@@ -1351,11 +1629,11 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
                 const totalMinutes = record.total_hours * 60;
                 totalHoursDisplay = `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`;
             }
-            let lateDisplay = null;
-            if (record.late_minutes && record.late_minutes > 0) {
-                lateDisplay = formatLateTime(parseFloat(record.late_minutes));
-            }
-            const isLate = record.late_minutes && parseFloat(record.late_minutes) > 0;
+
+            // Always recalculate late from clock_in_ist + shift_timing (fixes DB inconsistency)
+            const shiftTiming = employee.shift_timing || record.shift_time_used;
+            const late = recalculateLate(record.clock_in_ist, record.clock_in, shiftTiming, record.attendance_date);
+
             let status = record.status;
             if (!status) {
                 if (record.clock_in && !record.clock_out) status = 'working';
@@ -1372,9 +1650,9 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
                 total_minutes: record.total_minutes,
                 total_hours_display: totalHoursDisplay,
                 status: status,
-                is_late: isLate,
-                late_minutes: record.late_minutes ? parseFloat(record.late_minutes) : 0,
-                late_display: record.late_display || (isLate ? formatLateTime(parseFloat(record.late_minutes)) : null),
+                is_late: late.is_late,
+                late_minutes: late.late_minutes,
+                late_display: late.late_display,
                 early_minutes: record.early_minutes,
                 is_holiday: record.is_holiday,
                 comp_off_awarded: record.comp_off_awarded,
@@ -1530,6 +1808,207 @@ exports.markAbsentAtDayEnd = async () => {
     } catch (error) {
         console.error('Error marking absent:', error);
         return { success: false, error: error.message };
+    }
+};
+
+// Update historical late marks for all attendance records
+exports.updateHistoricalLateMarks = async (req, res) => {
+    try {
+        console.log('🚀 Starting historical late marks update via API...');
+        
+        // Get all attendance records with employee shift timing
+        const { data: attendanceRecords, error: attendanceError } = await supabase
+            .from('attendance')
+            .select(`
+                id,
+                employee_id,
+                attendance_date,
+                clock_in,
+                clock_in_ist,
+                late_minutes,
+                late_display,
+                shift_time_used,
+                employees!inner(shift_timing)
+            `)
+            .not('clock_in', 'is', null)
+            .order('attendance_date', { ascending: false });
+
+        if (attendanceError) {
+            throw attendanceError;
+        }
+
+        console.log(`📊 Found ${attendanceRecords.length} attendance records to process`);
+
+        let updatedCount = 0;
+        let alreadyCorrectCount = 0;
+        let errorCount = 0;
+
+        for (const record of attendanceRecords) {
+            try {
+                // Parse clock in time
+                let clockInTime;
+                const clockInValue = record.clock_in_ist || record.clock_in;
+                
+                if (clockInValue && typeof clockInValue === 'string' && clockInValue.includes(' ')) {
+                    const [datePart, timePart] = clockInValue.split(' ');
+                    const [year, month, day] = datePart.split('-');
+                    const [hour, minute, second] = timePart.split(':');
+                    clockInTime = new Date(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hour), parseInt(minute), parseInt(second || 0));
+                } else {
+                    clockInTime = new Date(clockInValue);
+                }
+
+                if (!clockInTime || isNaN(clockInTime.getTime())) {
+                    console.log(`⚠️ Invalid clock in time for record ${record.id}: ${clockInValue}`);
+                    errorCount++;
+                    continue;
+                }
+
+                // Parse shift timing
+                let shiftHour = 9, shiftMinute = 0;
+                const shiftString = record.employees?.shift_timing || record.shift_time_used;
+                
+                if (shiftString) {
+                    let startTimeStr = shiftString.trim();
+                    
+                    if (startTimeStr.includes('-')) {
+                        startTimeStr = startTimeStr.split('-')[0].trim();
+                    }
+                    
+                    let parsed = false;
+                    
+                    // Pattern 1: "9:00 AM" or "3:00 PM"
+                    const ampmMatch = startTimeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+                    if (ampmMatch) {
+                        let hour = parseInt(ampmMatch[1]);
+                        const minute = parseInt(ampmMatch[2]);
+                        const ampm = ampmMatch[3].toUpperCase();
+                        
+                        if (ampm === 'PM' && hour !== 12) hour += 12;
+                        if (ampm === 'AM' && hour === 12) hour = 0;
+                        
+                        shiftHour = hour;
+                        shiftMinute = minute;
+                        parsed = true;
+                    }
+                    
+                    // Pattern 2: "15:00" (24-hour format)
+                    if (!parsed) {
+                        const militaryMatch = startTimeStr.match(/(\d{1,2}):(\d{2})/);
+                        if (militaryMatch) {
+                            shiftHour = parseInt(militaryMatch[1]);
+                            shiftMinute = parseInt(militaryMatch[2]);
+                            parsed = true;
+                        }
+                    }
+                    
+                    // Pattern 3: Just hour "9" or "15"
+                    if (!parsed) {
+                        const hourMatch = startTimeStr.match(/^(\d{1,2})$/);
+                        if (hourMatch) {
+                            shiftHour = parseInt(hourMatch[1]);
+                            shiftMinute = 0;
+                            parsed = true;
+                        }
+                    }
+                }
+
+                // Create shift start time for the attendance date
+                const attendanceDate = new Date(record.attendance_date);
+                const shiftStartTime = new Date(
+                    attendanceDate.getFullYear(),
+                    attendanceDate.getMonth(),
+                    attendanceDate.getDate(),
+                    shiftHour,
+                    shiftMinute,
+                    0,
+                    0
+                );
+
+                // Calculate late time
+                const diffMs = clockInTime - shiftStartTime;
+                const isLate = diffMs > 0; // Any delay is late
+                
+                let lateMinutes = 0;
+                let lateDisplay = null;
+
+                if (isLate) {
+                    lateMinutes = diffMs / (1000 * 60);
+                    
+                    // Format late display
+                    const totalSeconds = Math.floor(diffMs / 1000);
+                    const hours = Math.floor(totalSeconds / 3600);
+                    const remainingSeconds = totalSeconds % 3600;
+                    const minutes = Math.floor(remainingSeconds / 60);
+                    const seconds = remainingSeconds % 60;
+
+                    const parts = [];
+                    if (hours > 0) parts.push(`${hours}h`);
+                    if (minutes > 0) parts.push(`${minutes}m`);
+                    if (seconds > 0 || (hours === 0 && minutes === 0)) parts.push(`${seconds}s`);
+                    lateDisplay = parts.join(' ');
+                }
+
+                const lateMinutesToSave = isLate ? parseFloat(lateMinutes.toFixed(4)) : 0;
+
+                // Check if update is needed
+                const currentLateMinutes = parseFloat(record.late_minutes) || 0;
+                const needsUpdate = Math.abs(currentLateMinutes - lateMinutesToSave) > 0.01 || 
+                                  record.late_display !== lateDisplay;
+
+                if (needsUpdate) {
+                    // Update the record
+                    const { error: updateError } = await supabase
+                        .from('attendance')
+                        .update({
+                            late_minutes: lateMinutesToSave,
+                            late_display: lateDisplay
+                        })
+                        .eq('id', record.id);
+
+                    if (updateError) {
+                        console.error(`❌ Error updating record ${record.id}:`, updateError);
+                        errorCount++;
+                    } else {
+                        updatedCount++;
+                        if (isLate) {
+                            console.log(`✅ Updated ${record.employee_id} (${record.attendance_date}): Late ${lateDisplay}`);
+                        }
+                    }
+                } else {
+                    alreadyCorrectCount++;
+                }
+
+            } catch (recordError) {
+                console.error(`❌ Error processing record ${record.id}:`, recordError);
+                errorCount++;
+            }
+        }
+
+        const result = {
+            success: true,
+            message: 'Historical late marks update completed successfully',
+            totalRecords: attendanceRecords.length,
+            updatedCount,
+            alreadyCorrectCount,
+            errorCount
+        };
+
+        console.log('📈 HISTORICAL LATE MARKS UPDATE COMPLETED');
+        console.log(`✅ Updated records: ${updatedCount}`);
+        console.log(`✓ Already correct: ${alreadyCorrectCount}`);
+        console.log(`❌ Errors: ${errorCount}`);
+        console.log(`📊 Total processed: ${attendanceRecords.length}`);
+
+        res.json(result);
+
+    } catch (error) {
+        console.error('❌ Error in updateHistoricalLateMarks:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update historical late marks',
+            error: error.message
+        });
     }
 };
 

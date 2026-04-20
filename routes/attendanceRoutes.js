@@ -44,6 +44,9 @@ module.exports = (supabase, authenticateToken, requireAdmin) => {
         res.json(result);
     });
 
+    // Update historical late marks (Admin only)
+    router.post('/update-historical-late-marks', authenticateToken, requireAdmin, attendanceController.updateHistoricalLateMarks);
+
     // Dashboard stats (Admin only)
     router.get('/dashboard-stats', authenticateToken, requireAdmin, async (req, res) => {
         try {
