@@ -116,8 +116,8 @@ const generateEmployeeIdBasedOnJoiningDate = async (joiningDate) => {
         return `B2B${year}${month}${fallbackSeq}`;
     }
 };
+
 // ============== TODAY'S EVENTS ROUTE (BIRTHDAYS & ANNIVERSARIES) ==============
-// Get today's birthdays and work anniversaries
 router.get('/today-events', async (req, res) => {
     try {
         const today = new Date();
@@ -203,7 +203,6 @@ router.get('/today-events', async (req, res) => {
 
 // ============== EMPLOYEE CRUD OPERATIONS ==============
 
-// Create new employee (Admin only)
 router.post('/', verifyToken, isAdmin, async (req, res) => {
     try {
         const employeeData = req.body;
@@ -503,8 +502,6 @@ router.get('/', async (req, res) => {
         });
     }
 });
-
-// routes/employeeRoutes.js - Hard Delete (Permanent)
 
 // Delete employee (Admin only - HARD DELETE)
 router.delete('/:id', verifyToken, isAdmin, async (req, res) => {

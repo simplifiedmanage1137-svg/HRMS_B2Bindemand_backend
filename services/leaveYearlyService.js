@@ -1,4 +1,3 @@
-// services/leaveYearlyService.js
 const supabase = require('../config/supabase');
 
 class LeaveYearlyService {
@@ -6,6 +5,7 @@ class LeaveYearlyService {
     /**
      * Check if today is the last day of the month (for cron job)
      */
+
     static isLastDayOfMonth(date = new Date()) {
         const tomorrow = new Date(date);
         tomorrow.setDate(tomorrow.getDate() + 1);
@@ -15,13 +15,11 @@ class LeaveYearlyService {
     /**
      * Get the last day of a given month
      */
+
     static getLastDayOfMonth(year, month) {
         return new Date(year, month + 1, 0).getDate();
     }
 
-    /**
-     * Calculate months completed (full months only, current month not counted until complete)
-     */
     static calculateCompletedMonthsFromJoining(joiningDate, currentDate = new Date()) {
         const join = new Date(joiningDate);
         const today = new Date(currentDate);
@@ -45,6 +43,7 @@ class LeaveYearlyService {
     /**
      * Get months that should be accrued (completed months after probation)
      */
+
     static getMonthsToAccrue(joiningDate, currentDate = new Date()) {
         const join = new Date(joiningDate);
         const today = new Date(currentDate);
@@ -91,6 +90,7 @@ class LeaveYearlyService {
     /**
      * Reset leave balance for new year (run on Jan 1st)
      */
+
     static async resetForNewYear() {
         try {
             const today = new Date();
@@ -196,6 +196,7 @@ class LeaveYearlyService {
     /**
      * Add monthly accrual for all eligible employees (run on last day of month)
      */
+    
     static async addMonthlyAccrual() {
         try {
             const today = new Date();

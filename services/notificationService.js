@@ -1,4 +1,3 @@
-// services/notificationService.js
 const supabase = require('../config/supabase');
 
 class NotificationService {

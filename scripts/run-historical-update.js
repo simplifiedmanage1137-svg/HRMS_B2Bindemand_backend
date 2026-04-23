@@ -1,8 +1,3 @@
-#!/usr/bin/env node
-
-// Simple script to update historical late marks
-// Usage: node run-historical-update.js
-
 const { updateHistoricalLateMarks } = require('./update-historical-late-marks');
 
 console.log('🚀 Starting Historical Late Marks Update...');

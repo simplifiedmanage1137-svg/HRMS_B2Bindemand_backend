@@ -4,7 +4,6 @@ const attendanceController = require('../controllers/attendanceController');
 
 // Note: This module exports a function that takes supabase, authenticateToken, and requireAdmin
 module.exports = (supabase, authenticateToken, requireAdmin) => {
-    // ============== EMPLOYEE ENDPOINTS ==============
     
     // Clock in/out endpoints
     router.post('/clock-in', attendanceController.clockIn);
@@ -21,12 +20,10 @@ module.exports = (supabase, authenticateToken, requireAdmin) => {
     router.get('/missed-clockouts/:employee_id', attendanceController.getMissedClockOuts);
     router.post('/regularization/:employee_id/request', attendanceController.requestRegularization);
 
-    // ============== ADMIN ENDPOINTS (Require admin role) ==============
-
     // Admin-only attendance report (full access)
     router.get('/report', authenticateToken, requireAdmin, attendanceController.getAttendanceReport);
 
-    // Regularization endpoints (Admin only)
+    // Regularization endpoints (Admin only) - MUST be before /:employee_id routes
     router.get('/regularization/pending', authenticateToken, requireAdmin, attendanceController.getPendingRegularizations);
     router.put('/regularization/:request_id/approve', authenticateToken, requireAdmin, attendanceController.approveRegularization);
     router.put('/regularization/:request_id/reject', authenticateToken, requireAdmin, attendanceController.rejectRegularization);

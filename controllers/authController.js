@@ -5,89 +5,65 @@ const jwt = require('jsonwebtoken');
 exports.login = async (req, res) => {
     try {
         const { email, password } = req.body;
-        
-        console.log('Login attempt for email:', email);
-        console.log('Request body:', req.body);
 
-        // Check if Supabase connection works
-        try {
-            const { error } = await supabase.from('users').select('count', { count: 'exact', head: true });
-            if (error) throw error;
-            console.log('Supabase connection OK');
-        } catch (dbError) {
-            console.error('Supabase connection error:', dbError);
-            return res.status(500).json({ message: 'Database connection error' });
+        if (!email || !password) {
+            return res.status(400).json({ success: false, message: 'Email and password are required' });
         }
 
-        // Get user from database
-        const { data: users, error: userError } = await supabase
-            .from('users')
+        // Get employee from database by email
+        const { data: employees, error: empError } = await supabase
+            .from('employees')
             .select('*')
-            .eq('email', email);
+            .eq('email', email.toLowerCase().trim());
 
-        if (userError) throw userError;
+        if (empError) throw empError;
 
-        console.log('Users found:', users?.length || 0);
-
-        if (!users || users.length === 0) {
-            console.log('User not found:', email);
-            return res.status(401).json({ message: 'Invalid email or password' });
+        if (!employees || employees.length === 0) {
+            return res.status(401).json({ success: false, message: 'Invalid email or password' });
         }
 
-        const user = users[0];
-        console.log('User found:', user.email, 'Role:', user.role);
-        
-        // Simple password check for testing
-        if (password === 'admin123' || password === 'Welcome@123') {
-            
-            // Get employee details if user is an employee
-            let employeeData = null;
-            if (user.role === 'employee') {
-                const { data: employees, error: empError } = await supabase
-                    .from('employees')
-                    .select('*')
-                    .eq('employee_id', user.employee_id);
+        const employee = employees[0];
 
-                if (empError) throw empError;
+        // Check password
+        let isPasswordValid = false;
 
-                if (employees && employees.length > 0) {
-                    employeeData = employees[0];
-                }
+        if (employee.password) {
+            // Try bcrypt compare first (hashed password)
+            try {
+                isPasswordValid = await bcrypt.compare(password, employee.password);
+            } catch (e) {
+                // Fallback: plain text compare (legacy)
+                isPasswordValid = (password === employee.password);
             }
-
-            // Generate JWT token
-            const token = jwt.sign(
-                { 
-                    id: user.id, 
-                    email: user.email,
-                    role: user.role,
-                    employeeId: user.employee_id 
-                },
-                process.env.JWT_SECRET || 'your_secret_key',
-                { expiresIn: '24h' }
-            );
-
-            console.log('Login successful for:', email);
-
-            return res.json({
-                success: true,
-                token,
-                user: {
-                    id: user.id,
-                    email: user.email,
-                    role: user.role,
-                    employeeId: user.employee_id,
-                    employeeData: employeeData
-                }
-            });
-        } else {
-            console.log('Invalid password for user:', email);
-            return res.status(401).json({ message: 'Invalid email or password' });
         }
+
+        if (!isPasswordValid) {
+            return res.status(401).json({ success: false, message: 'Invalid email or password' });
+        }
+
+        const role = employee.role || 'employee';
+
+        const token = jwt.sign(
+            { id: employee.id, email: employee.email, role, employeeId: employee.employee_id },
+            process.env.JWT_SECRET || 'your_secret_key',
+            { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
+        );
+
+        return res.json({
+            success: true,
+            token,
+            user: {
+                id: employee.id,
+                email: employee.email,
+                role,
+                employeeId: employee.employee_id,
+                employeeData: employee
+            }
+        });
 
     } catch (error) {
         console.error('Login error:', error);
-        res.status(500).json({ message: 'Server error', error: error.message });
+        res.status(500).json({ success: false, message: 'Server error', error: error.message });
     }
 };
 
@@ -144,86 +120,51 @@ exports.register = async (req, res) => {
     }
 };
 
-// Verify token and return user data
 exports.verifyToken = async (req, res) => {
     try {
-        // Get token from header
         const token = req.headers['authorization']?.split(' ')[1];
-        
+
         if (!token) {
-            return res.status(401).json({ 
-                success: false, 
-                message: 'No token provided' 
-            });
+            return res.status(401).json({ success: false, message: 'No token provided' });
         }
 
-        // Verify token
         const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_secret_key');
-        
-        // Get user from database
-        const { data: users, error: userError } = await supabase
-            .from('users')
-            .select('id, employee_id, email, role')
-            .eq('id', decoded.id);
 
-        if (userError) throw userError;
+        // Get employee from database
+        const { data: employees, error: empError } = await supabase
+            .from('employees')
+            .select('*')
+            .eq('employee_id', decoded.employeeId);
 
-        if (!users || users.length === 0) {
-            return res.status(401).json({ 
-                success: false, 
-                message: 'User not found' 
-            });
+        if (empError) throw empError;
+
+        if (!employees || employees.length === 0) {
+            return res.status(401).json({ success: false, message: 'Employee not found' });
         }
 
-        const user = users[0];
-
-        // Get employee details if user is an employee
-        let employeeData = null;
-        if (user.role === 'employee') {
-            const { data: employees, error: empError } = await supabase
-                .from('employees')
-                .select('*')
-                .eq('employee_id', user.employee_id);
-
-            if (empError) throw empError;
-
-            if (employees && employees.length > 0) {
-                employeeData = employees[0];
-            }
-        }
+        const employee = employees[0];
+        const role = employee.role || decoded.role || 'employee';
 
         res.json({
             success: true,
             user: {
-                id: user.id,
-                email: user.email,
-                role: user.role,
-                employeeId: user.employee_id,
-                employeeData: employeeData
+                id: employee.id,
+                email: employee.email,
+                role,
+                employeeId: employee.employee_id,
+                employeeData: employee
             }
         });
 
     } catch (error) {
-        console.error('Token verification error:', error);
-        
         if (error.name === 'JsonWebTokenError') {
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Invalid token' 
-            });
+            return res.status(401).json({ success: false, message: 'Invalid token' });
         }
-        
         if (error.name === 'TokenExpiredError') {
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Token expired' 
-            });
+            return res.status(401).json({ success: false, message: 'Token expired' });
         }
-
-        res.status(500).json({ 
-            success: false, 
-            message: 'Server error' 
-        });
+        console.error('Token verification error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 };
 

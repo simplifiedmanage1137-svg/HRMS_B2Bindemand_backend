@@ -1,4 +1,3 @@
-// controllers/notificationController.js
 const supabase = require('../config/supabase');
 
 // Get notifications for employee

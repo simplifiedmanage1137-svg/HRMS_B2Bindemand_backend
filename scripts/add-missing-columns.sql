@@ -1,0 +1,26 @@
+-- Run this in Supabase SQL Editor to add missing columns to attendance table
+
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS late_display TEXT;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS early_minutes NUMERIC DEFAULT 0;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS shift_time_used TEXT;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS is_holiday BOOLEAN DEFAULT FALSE;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS holiday_name TEXT;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS location_accuracy NUMERIC;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS clock_in_ist TEXT;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS clock_out_ist TEXT;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS total_hours_display TEXT;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS is_regularized BOOLEAN DEFAULT FALSE;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS regularization_requested BOOLEAN DEFAULT FALSE;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS regularization_request_id TEXT;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS regularization_status TEXT;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS regularization_approved BOOLEAN DEFAULT FALSE;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS regularization_approved_by TEXT;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS regularization_approved_at TIMESTAMPTZ;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS admin_notes TEXT;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS auto_closed BOOLEAN DEFAULT FALSE;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS overtime_hours NUMERIC DEFAULT 0;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS overtime_minutes NUMERIC DEFAULT 0;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS overtime_amount NUMERIC DEFAULT 0;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS has_overtime BOOLEAN DEFAULT FALSE;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS comp_off_awarded BOOLEAN DEFAULT FALSE;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS comp_off_days NUMERIC DEFAULT 0;

@@ -8,6 +8,7 @@ class EmployeeService {
      * @param {Date} currentDate - Current date (defaults to now)
      * @returns {number} Number of completed months
      */
+
     static calculateMonthsBetween(joiningDate, currentDate = new Date()) {
         const join = new Date(joiningDate);
         const current = new Date(currentDate);
@@ -30,6 +31,7 @@ class EmployeeService {
      * @param {Date} currentDate - Current date
      * @returns {number} Number of completed years
      */
+
     static calculateYearsBetween(joiningDate, currentDate = new Date()) {
         const join = new Date(joiningDate);
         const current = new Date(currentDate);
@@ -50,6 +52,7 @@ class EmployeeService {
      * @param {string} employeeId - Employee ID
      * @returns {Promise<Object>} Update result
      */
+
     static async updateEmployeeMonths(employeeId) {
         try {
             // Get employee joining date
@@ -104,6 +107,7 @@ class EmployeeService {
      * Update all employees' joining_month_count
      * @returns {Promise<Object>} Results object
      */
+
     static async updateAllEmployeesMonths() {
         try {
             const { data: employees, error } = await supabase
@@ -173,6 +177,7 @@ class EmployeeService {
      * @param {string|Date} joiningDate - Joining date
      * @returns {Promise<Object>} Initialization result
      */
+
     static async initializeNewEmployee(employeeId, joiningDate) {
         try {
             const monthsCompleted = this.calculateMonthsBetween(joiningDate);
@@ -208,6 +213,7 @@ class EmployeeService {
      * Get employees eligible for leave (completed 6 months)
      * @returns {Promise<Array>} List of eligible employees
      */
+
     static async getEligibleEmployees() {
         try {
             const { data: employees, error } = await supabase
@@ -229,6 +235,7 @@ class EmployeeService {
      * @param {number} months - Minimum months
      * @returns {Promise<Array>} List of employees
      */
+
     static async getEmployeesByMonths(months) {
         try {
             const { data: employees, error } = await supabase
@@ -250,6 +257,7 @@ class EmployeeService {
      * Get today's work anniversaries
      * @returns {Promise<Array>} List of employees with anniversary today
      */
+
     static async getTodayAnniversaries() {
         try {
             const today = new Date();
@@ -280,6 +288,7 @@ class EmployeeService {
      * Get today's birthdays
      * @returns {Promise<Array>} List of employees with birthday today
      */
+
     static async getTodayBirthdays() {
         try {
             const today = new Date();
@@ -305,6 +314,7 @@ class EmployeeService {
      * @param {string} employeeId - Employee ID
      * @returns {Promise<boolean>} Whether employee can apply
      */
+    
     static async canApplyLeave(employeeId) {
         try {
             const { data: employee, error } = await supabase

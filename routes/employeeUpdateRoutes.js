@@ -99,8 +99,6 @@ router.get('/current-data', verifyToken, async (req, res) => {
     }
 });
 
-// ============== STEP 4: Submit updated data for approval ==============
-
 // routes/employeeUpdateRoutes.js - Update submit-update endpoint
 
 router.post('/submit-update', verifyToken, async (req, res) => {
@@ -167,9 +165,9 @@ router.post('/submit-update', verifyToken, async (req, res) => {
 
         // Create notification for admin
         try {
-            // Get admin users
-            const { data: admins, error: adminError } = await supabase
-                .from('users')
+            // Get admin employees (role = 'admin')
+            const { data: admins } = await supabase
+                .from('employees')
                 .select('employee_id')
                 .eq('role', 'admin')
                 .limit(1);
@@ -182,9 +180,9 @@ router.post('/submit-update', verifyToken, async (req, res) => {
                     : `Employee ${req.employeeId} has submitted updated information for review.`;
 
                 await supabase
-                    .from('admin_notifications')
+                    .from('notifications')
                     .insert([{
-                        admin_id: adminId,
+                        employee_id: adminId,
                         title: notificationTitle,
                         message: notificationMessage,
                         type: isDocumentUpdate ? 'document_upload' : 'info_update',

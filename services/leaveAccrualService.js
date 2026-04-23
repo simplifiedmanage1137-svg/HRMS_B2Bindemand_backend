@@ -6,6 +6,7 @@ class LeaveAccrualService {
      * Add monthly leave accrual for all eligible employees
      * @returns {Promise<Object>} Result of accrual operation
      */
+
     static async addMonthlyAccrual() {
         try {
             console.log('='.repeat(70));
@@ -217,6 +218,7 @@ class LeaveAccrualService {
      * @param {string} joiningDate - Joining date
      * @returns {Promise<Object>} Initialized balance
      */
+
     static async initializeEmployeeBalance(employee_id, joiningDate) {
         try {
             console.log(`🔄 Initializing leave balance for employee ${employee_id}`);
@@ -333,6 +335,7 @@ class LeaveAccrualService {
      * @param {string} reason - Reason for manual accrual
      * @returns {Promise<Object>} Result
      */
+    
     static async addManualAccrual(employee_id, amount, reason) {
         try {
             const today = new Date();

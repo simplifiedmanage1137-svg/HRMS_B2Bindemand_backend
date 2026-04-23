@@ -5,6 +5,7 @@ const supabase = require('../config/supabase');
  * @param {string} ip - IP address to check
  * @returns {Promise<boolean>} - True if IP is whitelisted
  */
+
 const isOfficeIP = async (ip) => {
     try {
         if (!ip) {
@@ -48,6 +49,7 @@ const isOfficeIP = async (ip) => {
  * Get all whitelisted IPs (admin function)
  * @returns {Promise<Array>} - List of whitelisted IPs
  */
+
 const getAllWhitelistedIPs = async () => {
     try {
         const { data: ips, error } = await supabase
@@ -77,6 +79,7 @@ const getAllWhitelistedIPs = async () => {
  * @param {string} location - Location description
  * @returns {Promise<Object>} - Result object
  */
+
 const addToWhitelist = async (ip, location = 'Office') => {
     try {
         const cleanIP = ip.replace('::ffff:', '').trim();
@@ -144,6 +147,7 @@ const addToWhitelist = async (ip, location = 'Office') => {
  * @param {string} ip - IP address to remove
  * @returns {Promise<Object>} - Result object
  */
+
 const removeFromWhitelist = async (ip) => {
     try {
         const cleanIP = ip.replace('::ffff:', '').trim();
@@ -191,6 +195,7 @@ const removeFromWhitelist = async (ip) => {
  * Middleware to check attendance eligibility based on IP
  * Attaches client IP and attendance eligibility to request object
  */
+
 const checkAttendanceEligibility = async (req, res, next) => {
     try {
         // Get client IP from various possible headers
@@ -240,6 +245,7 @@ const checkAttendanceEligibility = async (req, res, next) => {
 /**
  * Strict middleware - blocks requests from non-office IPs
  */
+
 const requireOfficeIP = async (req, res, next) => {
     try {
         const clientIP = req.headers['x-forwarded-for'] || 

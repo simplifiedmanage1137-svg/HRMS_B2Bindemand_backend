@@ -1,8 +1,4 @@
-// controllers/leaveController.js - COMPLETE WORKING VERSION
-
 const supabase = require('../config/supabase');
-
-// ==================== LOCAL HELPER FUNCTIONS ====================
 
 // Replace the getCompletedMonthsInCurrentYear function with this simplified version:
 
@@ -103,29 +99,36 @@ exports.getLeaveBalance = async (req, res) => {
             is_probation_complete: isProbComplete
         });
 
+        // All approved leaves (any type) reduce the balance
         const { data: usedLeaves, error: usedError } = await supabase
             .from('leaves')
-            .select('days_count')
+            .select('days_count, leave_type')
             .eq('employee_id', employee_id)
             .eq('status', 'approved')
-            .in('leave_type', ['Annual', 'Sick', 'Personal', 'Maternity', 'Paternity', 'Bereavement'])
             .gte('start_date', `${currentYear}-01-01`)
             .lte('start_date', `${currentYear}-12-31`);
 
         if (usedError) throw usedError;
-        const used = usedLeaves?.reduce((sum, leave) => sum + (leave.days_count || 0), 0) || 0;
 
+        // Count all approved leaves except Unpaid (Unpaid doesn't reduce accrued balance)
+        const used = usedLeaves
+            ?.filter(l => l.leave_type !== 'Unpaid')
+            ?.reduce((sum, leave) => sum + (parseFloat(leave.days_count) || 0), 0) || 0;
+
+        // All pending leaves (any type except Unpaid) also reduce available balance
         const { data: pendingLeaves, error: pendingError } = await supabase
             .from('leaves')
-            .select('days_count')
+            .select('days_count, leave_type')
             .eq('employee_id', employee_id)
             .eq('status', 'pending')
-            .in('leave_type', ['Annual', 'Sick', 'Personal', 'Maternity', 'Paternity', 'Bereavement'])
             .gte('start_date', `${currentYear}-01-01`)
             .lte('start_date', `${currentYear}-12-31`);
 
         if (pendingError) throw pendingError;
-        const pending = pendingLeaves?.reduce((sum, leave) => sum + (leave.days_count || 0), 0) || 0;
+
+        const pending = pendingLeaves
+            ?.filter(l => l.leave_type !== 'Unpaid')
+            ?.reduce((sum, leave) => sum + (parseFloat(leave.days_count) || 0), 0) || 0;
 
         let available = 0;
         if (isProbComplete) {

@@ -6,6 +6,7 @@ class CompOffService {
     /**
      * Check if a date is a holiday
      */
+
     static async isHoliday(date) {
         try {
             const dateStr = date.toISOString().split('T')[0];
@@ -30,6 +31,7 @@ class CompOffService {
     /**
      * Check if employee worked on a holiday
      */
+
     static async checkHolidayWork(employee_id, date, total_hours) {
         try {
             const holiday = await this.isHoliday(date);
@@ -51,6 +53,7 @@ class CompOffService {
     /**
      * Earn comp-off for working on holiday
      */
+
     static async earnCompOff(employee_id, holiday_date, holiday_name, worked_hours) {
         try {
             const date = new Date(holiday_date);
@@ -145,6 +148,7 @@ class CompOffService {
     /**
      * Get comp-off balance for employee
      */
+
     static async getCompOffBalance(employee_id) {
         try {
             const currentYear = new Date().getFullYear();
@@ -187,6 +191,7 @@ class CompOffService {
     /**
      * Get available comp-off leaves
      */
+
     static async getAvailableCompOffs(employee_id) {
         try {
             const today = new Date().toISOString().split('T')[0];
@@ -211,6 +216,7 @@ class CompOffService {
     /**
      * Use comp-off for leave
      */
+
     static async useCompOff(employee_id, leaveId, days = 1) {
         try {
             const available = await this.getAvailableCompOffs(employee_id);
@@ -263,6 +269,7 @@ class CompOffService {
     /**
      * Check and expire comp-offs
      */
+    
     static async expireCompOffs() {
         try {
             const today = new Date().toISOString().split('T')[0];

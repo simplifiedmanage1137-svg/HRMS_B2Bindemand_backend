@@ -43,7 +43,6 @@ console.log(`Port: ${PORT}`);
 console.log('='.repeat(70));
 
 // ============== CORS CONFIGURATION ==============
-// Read allowed origins from environment variable or use defaults
 const allowedOriginsFromEnv = process.env.ALLOWED_ORIGINS 
     ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
     : [];
@@ -71,39 +70,36 @@ uniqueAllowedOrigins.forEach(origin => {
     console.log(`   - ${origin}`);
 });
 
-// Apply CORS middleware - this handles OPTIONS automatically
 app.use(cors({
     origin: function(origin, callback) {
-        // Allow requests with no origin (like mobile apps, curl, Postman)
-        if (!origin) {
-            console.log('✅ No origin header, allowing request');
+        // Allow requests with no origin (mobile apps, curl, Postman, same-origin)
+        if (!origin) return callback(null, true);
+
+        // Allow all localhost/127.0.0.1 ports (any machine running locally)
+        if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
             return callback(null, true);
         }
-        
-        // Check if origin is allowed
+
+        // Allow local network IPs (192.168.x.x, 10.x.x.x) for LAN access
+        if (/^https?:\/\/(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(origin)) {
+            return callback(null, true);
+        }
+
+        // Allow explicitly listed origins from env
         if (uniqueAllowedOrigins.includes(origin)) {
-            console.log(`✅ CORS allowed: ${origin}`);
             return callback(null, true);
         }
-        
-        // For debugging - log blocked origins
+
         console.log(`❌ CORS blocked: ${origin}`);
-        console.log(`   Allowed origins:`, uniqueAllowedOrigins);
         return callback(new Error(`Not allowed by CORS: ${origin}`));
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: [
-        'Content-Type',
-        'Authorization',
-        'X-Requested-With',
-        'Accept',
-        'Origin',
-        'employee-id',
-        'X-Employee-Id'
+        'Content-Type', 'Authorization', 'X-Requested-With',
+        'Accept', 'Origin', 'employee-id', 'X-Employee-Id'
     ],
-    exposedHeaders: ['Content-Length', 'X-Request-Id'],
-    maxAge: 86400 // 24 hours - cache preflight results
+    maxAge: 86400
 }));
 
 
@@ -435,7 +431,6 @@ console.log('   - Daily at 23:59: End-of-day absent marking');
 console.log('   - Weekly on Sunday at 02:00: Database cleanup');
 
 // ============== ERROR HANDLING MIDDLEWARE ==============
-// 404 handler
 app.use((req, res) => {
     res.status(404).json({
         success: false,

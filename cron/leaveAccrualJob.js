@@ -1,4 +1,3 @@
-// cron/leaveAccrual.js
 const LeaveYearlyService = require('../services/leaveYearlyService');
 
 async function runMonthlyAccrual() {

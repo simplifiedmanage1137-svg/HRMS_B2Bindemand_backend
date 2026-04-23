@@ -1,4 +1,3 @@
-// Fix script to update missing late_display in existing attendance records
 const supabase = require('./config/supabase');
 
 // Format late time for display

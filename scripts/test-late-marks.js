@@ -1,6 +1,3 @@
-#!/usr/bin/env node
-
-// Test script to verify late marks functionality
 const axios = require('axios');
 
 const testLateMarks = async () => {

@@ -6,6 +6,7 @@ const bcrypt = require('bcryptjs');
  * @param {number} saltRounds - Number of salt rounds (default: 10)
  * @returns {Promise<string>} Hashed password
  */
+
 const hashPassword = async (password, saltRounds = 10) => {
     try {
         const salt = await bcrypt.genSalt(saltRounds);
@@ -23,6 +24,7 @@ const hashPassword = async (password, saltRounds = 10) => {
  * @param {string} hashedPassword - Stored hash to compare against
  * @returns {Promise<boolean>} True if password matches
  */
+
 const comparePassword = async (password, hashedPassword) => {
     try {
         return await bcrypt.compare(password, hashedPassword);
@@ -36,6 +38,7 @@ const comparePassword = async (password, hashedPassword) => {
  * Generate password hashes for default users
  * Use this to create initial admin/employee accounts
  */
+
 const generateDefaultHashes = async () => {
     try {
         console.log('='.repeat(50));
@@ -69,6 +72,7 @@ const generateDefaultHashes = async () => {
  * Generate hash for a specific password
  * @param {string} password - Password to hash
  */
+
 const generateHashForPassword = async (password) => {
     try {
         const hash = await hashPassword(password);

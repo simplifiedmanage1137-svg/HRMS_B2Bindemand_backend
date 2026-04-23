@@ -3,7 +3,6 @@ const cron = require('node-cron');
 const LeaveYearlyService = require('../services/leaveYearlyService');
 
 // ============== MONTHLY LEAVE ACCRUAL ==============
-// ✅ Runs at 00:00 (midnight) on the LAST DAY of every month
 cron.schedule('0 0 28-31 * *', async () => {
     const now = new Date();
     const currentDate = now.getDate();
@@ -44,7 +43,6 @@ cron.schedule('0 0 28-31 * *', async () => {
 });
 
 // ============== YEAR-END LEAVE RESET ==============
-// ✅ Runs at 00:00 (midnight) on JANUARY 1st every year
 cron.schedule('0 0 1 1 *', async () => {
     const now = new Date();
     

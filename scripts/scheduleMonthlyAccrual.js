@@ -1,5 +1,3 @@
-// scripts/scheduleMonthlyAccrual.js - UPDATED
-
 const cron = require('node-cron');
 const supabase = require('../config/supabase');
 const LeaveYearlyService = require('../services/leaveYearlyService');

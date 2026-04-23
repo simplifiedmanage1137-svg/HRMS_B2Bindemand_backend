@@ -10,6 +10,7 @@ class GeofenceService {
      * @param {number} lon2 - Second longitude
      * @returns {number} Distance in meters
      */
+
     static calculateDistance(lat1, lon1, lat2, lon2) {
         const R = 6371e3; // Earth's radius in meters
         const φ1 = lat1 * Math.PI / 180;
@@ -31,6 +32,7 @@ class GeofenceService {
      * @param {number} longitude - Employee's longitude
      * @returns {Promise<Object>} Geofence check result
      */
+
     static async checkGeofence(latitude, longitude) {
         try {
             const { data: geofences, error } = await supabase
@@ -75,6 +77,7 @@ class GeofenceService {
      * Get all active geofences
      * @returns {Promise<Array>} List of active geofences
      */
+
     static async getActiveGeofences() {
         try {
             const { data: geofences, error } = await supabase
@@ -95,6 +98,7 @@ class GeofenceService {
      * Get all geofences (including inactive) - Admin only
      * @returns {Promise<Array>} List of all geofences
      */
+
     static async getAllGeofences() {
         try {
             const { data: geofences, error } = await supabase
@@ -118,6 +122,7 @@ class GeofenceService {
      * @param {number} radius_meters - Radius in meters
      * @returns {Promise<Object>} Created geofence
      */
+
     static async addGeofence(location_name, latitude, longitude, radius_meters) {
         try {
             // Validate inputs
@@ -157,6 +162,7 @@ class GeofenceService {
      * @param {Object} updates - Fields to update
      * @returns {Promise<Object>} Updated geofence
      */
+
     static async updateGeofence(id, updates) {
         try {
             // Remove fields that shouldn't be updated
@@ -188,6 +194,7 @@ class GeofenceService {
      * @param {number} id - Geofence ID
      * @returns {Promise<Object>} Result
      */
+
     static async deleteGeofence(id) {
         try {
             const { data, error } = await supabase
@@ -215,6 +222,7 @@ class GeofenceService {
      * @param {number} id - Geofence ID
      * @returns {Promise<Object>} Result
      */
+
     static async hardDeleteGeofence(id) {
         try {
             const { data, error } = await supabase
@@ -242,6 +250,7 @@ class GeofenceService {
      * @param {number} id - Geofence ID
      * @returns {Promise<Object>} Geofence
      */
+
     static async getGeofenceById(id) {
         try {
             const { data, error } = await supabase
@@ -269,6 +278,7 @@ class GeofenceService {
      * @param {number} longitude - Longitude to check
      * @returns {Promise<Object>} Validation result with nearest geofence info
      */
+    
     static async validateLocation(latitude, longitude) {
         try {
             const { data: geofences, error } = await supabase

@@ -304,11 +304,11 @@ router.post('/handle-request', verifyToken, isAdmin, async (req, res) => {
             has_employee_data: !!request.employee_data
         });
 
-        // Check if request is in completed state
-        if (request.status !== 'completed') {
+        // Check if request can be actioned
+        if (!['pending', 'completed', 'in_progress'].includes(request.status)) {
             return res.status(400).json({
                 success: false,
-                message: `Request is not in completed state. Current status: ${request.status}`
+                message: `Request cannot be actioned. Current status: ${request.status}`
             });
         }
 
@@ -318,22 +318,44 @@ router.post('/handle-request', verifyToken, isAdmin, async (req, res) => {
         if (action === 'approve' && request.employee_data && Object.keys(request.employee_data).length > 0) {
             try {
                 console.log('📝 Updating employee data for:', request.employee_id);
-                console.log('Employee data:', request.employee_data);
+                console.log('Employee data to update:', request.employee_data);
 
-                const { error: empUpdateError } = await supabase
-                    .from('employees')
-                    .update(request.employee_data)
-                    .eq('employee_id', request.employee_id);
+                // Only include fields that exist in employees table
+                const ALLOWED_EMPLOYEE_FIELDS = [
+                    'first_name', 'middle_name', 'last_name', 'dob', 'blood_group',
+                    'email', 'phone', 'address', 'city', 'state', 'pincode',
+                    'bank_account_name', 'account_number', 'ifsc_code', 'branch_name',
+                    'pan_number', 'aadhar_number',
+                    'designation', 'department', 'employment_type', 'shift_timing',
+                    'reporting_manager', 'emergency_contact',
+                    'gross_salary', 'in_hand_salary'
+                ];
 
-                if (empUpdateError) {
-                    console.error('❌ Error updating employee:', empUpdateError);
-                    // Don't throw, just log - we still want to mark request as approved
+                const filteredData = {};
+                for (const [key, value] of Object.entries(request.employee_data)) {
+                    if (ALLOWED_EMPLOYEE_FIELDS.includes(key) && value !== undefined && value !== null) {
+                        filteredData[key] = value;
+                    }
+                }
+
+                if (Object.keys(filteredData).length === 0) {
+                    console.log('⚠️ No valid fields to update');
                 } else {
-                    console.log('✅ Employee data updated successfully');
+                    console.log('📝 Filtered update data:', filteredData);
+
+                    const { error: empUpdateError } = await supabase
+                        .from('employees')
+                        .update(filteredData)
+                        .eq('employee_id', request.employee_id);
+
+                    if (empUpdateError) {
+                        console.error('❌ Error updating employee:', empUpdateError);
+                    } else {
+                        console.log('✅ Employee data updated successfully:', Object.keys(filteredData));
+                    }
                 }
             } catch (empError) {
                 console.error('❌ Employee update failed:', empError);
-                // Continue with request approval even if employee update fails
             }
         }
 

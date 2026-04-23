@@ -1,7 +1,4 @@
-#!/usr/bin/env node
-
 // Comprehensive fix for late marks issue
-// This will run the historical update and then specifically check employee B2B240801
 
 const { updateHistoricalLateMarks } = require('./update-historical-late-marks');
 const supabase = require('../config/supabase');

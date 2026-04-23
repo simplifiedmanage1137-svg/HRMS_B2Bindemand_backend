@@ -1,4 +1,3 @@
-// cron/compOffCron.js
 const cron = require('node-cron');
 const CompOffService = require('../services/compOffService');
 
