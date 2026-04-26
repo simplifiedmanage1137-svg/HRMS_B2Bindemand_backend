@@ -64,6 +64,15 @@ function getEligibleFromDate(joiningDate) {
     return eligibleDate.toISOString().split('T')[0];
 }
 
+// Helper: check if designation is team leader/manager level
+const isTeamLeaderDesignation = (designation) => {
+    if (!designation) return false;
+    const d = designation.toLowerCase();
+    return d.includes('team leader') || d.includes('team manager') ||
+           d.includes('tl') || d.includes('lead') || d.includes('manager') ||
+           d.includes('head') || d.includes('supervisor');
+};
+
 // ==================== GET LEAVE BALANCE ====================
 exports.getLeaveBalance = async (req, res) => {
     try {
@@ -317,8 +326,21 @@ exports.getLeaves = async (req, res) => {
         const isReportingManager = req.query.reporting_manager === 'true';
 
         if (isAdmin) {
-            // Admin: all leaves, only view (no approve/reject from here)
-            if (req.query.employee_id) query = query.eq('employee_id', req.query.employee_id);
+            // Admin: all leaves
+            // If ?team_leader=true → only show team leader/manager leaves (for approve/reject)
+            // Otherwise show all leaves (view only)
+            if (req.query.team_leader === 'true') {
+                // Fetch only team leader/manager employees
+                const { data: allEmps } = await supabase
+                    .from('employees').select('employee_id, designation');
+                const tlIds = (allEmps || [])
+                    .filter(e => isTeamLeaderDesignation(e.designation))
+                    .map(e => e.employee_id);
+                if (tlIds.length === 0) return res.json([]);
+                query = query.in('employee_id', tlIds);
+            } else {
+                if (req.query.employee_id) query = query.eq('employee_id', req.query.employee_id);
+            }
         } else if (isReportingManager) {
             // Reporting manager: leaves where reporting_manager matches OR
             // employee's reporting_manager in employees table matches (for old leaves with null reporting_manager)
@@ -384,13 +406,45 @@ exports.updateLeaveStatus = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Leave request not found' });
         }
 
-        // Only reporting manager can approve/reject (not admin)
-        if (userRole !== 'admin' && status !== 'cancelled') {
+        // Authorization logic:
+        // - Team Leader/Manager employee's leave: only admin can approve/reject
+        // - Regular employee's leave: only their reporting manager can approve/reject
+        // - Admin can always approve/reject team leader leaves
+        // - Employee can cancel their own leave
+        if (status === 'cancelled') {
+            // Employee cancelling own leave - allow
+        } else if (userRole === 'admin') {
+            // Admin approving - verify it's a team leader's leave
+            const { data: leaveEmp } = await supabase
+                .from('employees').select('designation')
+                .eq('employee_id', leave.employee_id).single();
+            if (!isTeamLeaderDesignation(leaveEmp?.designation)) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Admin can only approve/reject Team Leader or Manager leave requests. Regular employee leaves must be approved by their reporting manager.'
+                });
+            }
+        } else {
+            // Non-admin: must be the reporting manager of a regular (non-TL) employee
+            const { data: leaveEmp } = await supabase
+                .from('employees').select('designation')
+                .eq('employee_id', leave.employee_id).single();
+            if (isTeamLeaderDesignation(leaveEmp?.designation)) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Team Leader/Manager leave requests can only be approved by Admin.'
+                });
+            }
             const { data: approver } = await supabase
                 .from('employees').select('first_name, last_name')
                 .eq('employee_id', approver_id).single();
             const approverName = approver ? `${approver.first_name} ${approver.last_name}` : '';
-            if (leave.reporting_manager !== approverName) {
+            // Check via employee's reporting_manager field (handles null reporting_manager in leave)
+            const { data: empData } = await supabase
+                .from('employees').select('reporting_manager')
+                .eq('employee_id', leave.employee_id).single();
+            const empReportingManager = empData?.reporting_manager || leave.reporting_manager || '';
+            if (empReportingManager !== approverName) {
                 return res.status(403).json({
                     success: false,
                     message: 'Only the assigned reporting manager can approve or reject this leave'
