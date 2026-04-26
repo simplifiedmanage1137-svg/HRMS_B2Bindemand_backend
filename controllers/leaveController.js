@@ -99,7 +99,7 @@ exports.getLeaveBalance = async (req, res) => {
             is_probation_complete: isProbComplete
         });
 
-        // All approved leaves (any type) reduce the balance
+        // Approved leaves - split by type
         const { data: usedLeaves, error: usedError } = await supabase
             .from('leaves')
             .select('days_count, leave_type')
@@ -107,15 +107,19 @@ exports.getLeaveBalance = async (req, res) => {
             .eq('status', 'approved')
             .gte('start_date', `${currentYear}-01-01`)
             .lte('start_date', `${currentYear}-12-31`);
-
         if (usedError) throw usedError;
 
-        // Count all approved leaves except Unpaid (Unpaid doesn't reduce accrued balance)
+        // Paid leaves used (excludes Unpaid & Comp-Off)
         const used = usedLeaves
-            ?.filter(l => l.leave_type !== 'Unpaid')
-            ?.reduce((sum, leave) => sum + (parseFloat(leave.days_count) || 0), 0) || 0;
+            ?.filter(l => l.leave_type !== 'Unpaid' && l.leave_type !== 'Comp-Off')
+            ?.reduce((sum, l) => sum + (parseFloat(l.days_count) || 0), 0) || 0;
 
-        // All pending leaves (any type except Unpaid) also reduce available balance
+        // Unpaid leaves used separately
+        const unpaidUsed = usedLeaves
+            ?.filter(l => l.leave_type === 'Unpaid')
+            ?.reduce((sum, l) => sum + (parseFloat(l.days_count) || 0), 0) || 0;
+
+        // Pending paid leaves
         const { data: pendingLeaves, error: pendingError } = await supabase
             .from('leaves')
             .select('days_count, leave_type')
@@ -123,12 +127,15 @@ exports.getLeaveBalance = async (req, res) => {
             .eq('status', 'pending')
             .gte('start_date', `${currentYear}-01-01`)
             .lte('start_date', `${currentYear}-12-31`);
-
         if (pendingError) throw pendingError;
 
         const pending = pendingLeaves
-            ?.filter(l => l.leave_type !== 'Unpaid')
-            ?.reduce((sum, leave) => sum + (parseFloat(leave.days_count) || 0), 0) || 0;
+            ?.filter(l => l.leave_type !== 'Unpaid' && l.leave_type !== 'Comp-Off')
+            ?.reduce((sum, l) => sum + (parseFloat(l.days_count) || 0), 0) || 0;
+
+        const unpaidPending = pendingLeaves
+            ?.filter(l => l.leave_type === 'Unpaid')
+            ?.reduce((sum, l) => sum + (parseFloat(l.days_count) || 0), 0) || 0;
 
         let available = 0;
         if (isProbComplete) {
@@ -155,6 +162,8 @@ exports.getLeaveBalance = async (req, res) => {
             used: used.toFixed(1),
             pending: pending.toFixed(1),
             available: available.toFixed(1),
+            unpaid_used: unpaidUsed.toFixed(1),
+            unpaid_pending: unpaidPending.toFixed(1),
             comp_off_balance: (employee.comp_off_balance || 0).toFixed(1),
             months_completed_in_year: completedMonths,
             total_months_from_joining: totalMonthsFromJoining,
@@ -186,75 +195,43 @@ exports.getLeaveBalance = async (req, res) => {
 // ==================== APPLY LEAVE ====================
 exports.applyLeave = async (req, res) => {
     try {
-        console.log('='.repeat(50));
-        console.log('📝 LEAVE APPLICATION');
-        console.log('Request body:', JSON.stringify(req.body, null, 2));
-        console.log('='.repeat(50));
-
         const {
-            employee_id,
-            leave_type,
-            leave_duration,
-            half_day_type,
-            start_date,
-            end_date,
-            reason,
-            days_count,
-            reporting_manager
+            employee_id, leave_type, leave_duration, half_day_type,
+            start_date, end_date, reason, days_count, reporting_manager
         } = req.body;
 
         if (!employee_id || !leave_type || !start_date || !reason) {
-            return res.status(400).json({
-                success: false,
-                message: 'Missing required fields'
-            });
+            return res.status(400).json({ success: false, message: 'Missing required fields' });
+        }
+
+        if (!reporting_manager || !reporting_manager.trim()) {
+            return res.status(400).json({ success: false, message: 'Reporting manager is required' });
         }
 
         const { data: employee, error: empError } = await supabase
-            .from('employees')
-            .select('joining_date, comp_off_balance')
-            .eq('employee_id', employee_id)
-            .single();
-
+            .from('employees').select('joining_date, comp_off_balance, first_name, last_name')
+            .eq('employee_id', employee_id).single();
         if (empError) throw empError;
 
         const joiningDate = new Date(employee.joining_date);
         const today = new Date();
-        
-        let totalMonths = (today.getFullYear() - joiningDate.getFullYear()) * 12 + 
+        let totalMonths = (today.getFullYear() - joiningDate.getFullYear()) * 12 +
                           (today.getMonth() - joiningDate.getMonth());
-        if (today.getDate() < joiningDate.getDate()) {
-            totalMonths = Math.max(0, totalMonths - 1);
-        }
+        if (today.getDate() < joiningDate.getDate()) totalMonths = Math.max(0, totalMonths - 1);
         const isProbComplete = totalMonths >= 6;
 
-        console.log('📊 Probation check:', {
-            joining_date: employee.joining_date,
-            total_months: totalMonths,
-            isProbationComplete: isProbComplete
-        });
-
-        if (!isProbComplete) {
-            if (leave_type !== 'Unpaid' && leave_type !== 'Comp-Off') {
-                return res.status(400).json({
-                    success: false,
-                    message: `During probation period (${totalMonths}/6 months completed), you can only apply for Unpaid Leave or Comp-Off.`
-                });
-            }
+        if (!isProbComplete && leave_type !== 'Unpaid' && leave_type !== 'Comp-Off') {
+            return res.status(400).json({
+                success: false,
+                message: `During probation (${totalMonths}/6 months), only Unpaid or Comp-Off leave allowed.`
+            });
         }
 
         if (isProbComplete && leave_type !== 'Unpaid' && leave_type !== 'Comp-Off') {
-            const { data: balanceData, error: balanceError } = await supabase
-                .from('leave_balance')
-                .select('current_balance')
-                .eq('employee_id', employee_id)
-                .eq('leave_year', today.getFullYear())
-                .maybeSingle();
-
-            if (balanceError) throw balanceError;
-
+            const { data: balanceData } = await supabase
+                .from('leave_balance').select('current_balance')
+                .eq('employee_id', employee_id).eq('leave_year', today.getFullYear()).maybeSingle();
             const available = balanceData?.current_balance || 0;
-
             if (available < days_count) {
                 return res.status(400).json({
                     success: false,
@@ -263,58 +240,66 @@ exports.applyLeave = async (req, res) => {
             }
         }
 
-        if (leave_type === 'Comp-Off') {
-            if ((employee.comp_off_balance || 0) < days_count) {
-                return res.status(400).json({
-                    success: false,
-                    message: `Insufficient Comp-Off balance. Available: ${employee.comp_off_balance || 0} days`
-                });
-            }
+        if (leave_type === 'Comp-Off' && (employee.comp_off_balance || 0) < days_count) {
+            return res.status(400).json({
+                success: false,
+                message: `Insufficient Comp-Off balance. Available: ${employee.comp_off_balance || 0} days`
+            });
         }
+
+        // IST timestamp for created_at
+        const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+        const nowUTC = new Date();
+        const istMs = nowUTC.getTime() + IST_OFFSET_MS;
+        const istDate = new Date(istMs);
+        const createdAtIST = `${istDate.getUTCFullYear()}-${String(istDate.getUTCMonth()+1).padStart(2,'0')}-${String(istDate.getUTCDate()).padStart(2,'0')} ${String(istDate.getUTCHours()).padStart(2,'0')}:${String(istDate.getUTCMinutes()).padStart(2,'0')}:${String(istDate.getUTCSeconds()).padStart(2,'0')}`;
 
         const { data: leaveData, error: leaveError } = await supabase
             .from('leaves')
             .insert([{
                 employee_id,
-                leave_type,
-                leave_duration,
+                employee_name: `${employee.first_name} ${employee.last_name}`,
+                leave_type, leave_duration,
                 half_day_type: half_day_type || null,
                 start_date,
                 end_date: end_date || start_date,
                 reason,
                 days_count: days_count || 1,
-                reporting_manager: reporting_manager || null,
+                reporting_manager: reporting_manager.trim(),
                 status: 'pending',
-                applied_date: new Date().toISOString().split('T')[0],
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
+                applied_date: nowUTC.toISOString().split('T')[0],
+                created_at: createdAtIST,
+                updated_at: createdAtIST
             }])
             .select();
 
         if (leaveError) {
-            console.error('❌ Leave insert error:', leaveError);
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to submit leave request',
-                error: leaveError.message
-            });
+            // If employee_name column doesn't exist, retry without it
+            if (leaveError.message && leaveError.message.includes('employee_name')) {
+                const { data: leaveData2, error: leaveError2 } = await supabase
+                    .from('leaves')
+                    .insert([{
+                        employee_id, leave_type, leave_duration,
+                        half_day_type: half_day_type || null,
+                        start_date, end_date: end_date || start_date,
+                        reason, days_count: days_count || 1,
+                        reporting_manager: reporting_manager.trim(),
+                        status: 'pending',
+                        applied_date: nowUTC.toISOString().split('T')[0],
+                        created_at: createdAtIST, updated_at: createdAtIST
+                    }])
+                    .select();
+                if (leaveError2) throw leaveError2;
+                return res.json({ success: true, message: 'Leave request submitted successfully!', leave: leaveData2[0] });
+            }
+            throw leaveError;
         }
 
-        console.log('✅ Leave applied successfully:', leaveData[0]);
-
-        res.json({
-            success: true,
-            message: 'Leave request submitted successfully!',
-            leave: leaveData[0]
-        });
+        res.json({ success: true, message: 'Leave request submitted successfully!', leave: leaveData[0] });
 
     } catch (error) {
         console.error('❌ Error applying leave:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to apply leave',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Failed to apply leave', error: error.message });
     }
 };
 
@@ -324,32 +309,46 @@ exports.getLeaves = async (req, res) => {
         const authenticatedUserId = req.user?.employeeId;
         const userRole = req.user?.role;
 
-        let query = supabase.from('leaves').select('*');
+        let query = supabase
+            .from('leaves')
+            .select('*, employees!inner(first_name, last_name, department, designation)');
 
-        if (!(userRole === 'admin' && req.query.all === 'true')) {
-            if (!authenticatedUserId) {
-                return res.json([]);
-            }
+        const isAdmin = userRole === 'admin' && req.query.all === 'true';
+        const isReportingManager = req.query.reporting_manager === 'true';
+
+        if (isAdmin) {
+            // Admin: all leaves, only view (no approve/reject from here)
+            if (req.query.employee_id) query = query.eq('employee_id', req.query.employee_id);
+        } else if (isReportingManager) {
+            // Reporting manager: only leaves where they are the reporting_manager
+            const { data: emp } = await supabase
+                .from('employees').select('first_name, last_name')
+                .eq('employee_id', authenticatedUserId).single();
+            const managerName = emp ? `${emp.first_name} ${emp.last_name}` : '';
+            query = query.eq('reporting_manager', managerName);
+        } else {
+            // Employee: own leaves only
+            if (!authenticatedUserId) return res.json([]);
             query = query.eq('employee_id', authenticatedUserId);
-        } else if (req.query.employee_id) {
-            query = query.eq('employee_id', req.query.employee_id);
         }
 
-        query = query.order('applied_date', { ascending: false });
-
+        query = query.order('created_at', { ascending: false });
         const { data: leaves, error } = await query;
-
         if (error) throw error;
 
-        res.json(leaves || []);
+        const formatted = (leaves || []).map(l => ({
+            ...l,
+            first_name: l.employees?.first_name || l.employee_name?.split(' ')[0] || '',
+            last_name: l.employees?.last_name || l.employee_name?.split(' ').slice(1).join(' ') || '',
+            department: l.employees?.department || '',
+            designation: l.employees?.designation || '',
+            employees: undefined
+        }));
 
+        res.json(formatted);
     } catch (error) {
         console.error('❌ Error in getLeaves:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching leaves',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Error fetching leaves', error: error.message });
     }
 };
 
@@ -358,69 +357,84 @@ exports.updateLeaveStatus = async (req, res) => {
     try {
         const { id } = req.params;
         const { status, remarks } = req.body;
-        const approver_id = req.user?.employeeId || req.body.approved_by;
+        const approver_id = req.user?.employeeId;
+        const userRole = req.user?.role;
 
         if (!status || !['approved', 'rejected', 'cancelled'].includes(status)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Valid status (approved/rejected/cancelled) is required'
-            });
+            return res.status(400).json({ success: false, message: 'Valid status required' });
         }
 
         const { data: leave, error: fetchError } = await supabase
-            .from('leaves')
-            .select('*')
-            .eq('id', id)
-            .single();
-
+            .from('leaves').select('*').eq('id', id).single();
         if (fetchError || !leave) {
-            return res.status(404).json({
-                success: false,
-                message: 'Leave request not found'
-            });
+            return res.status(404).json({ success: false, message: 'Leave request not found' });
         }
+
+        // Only reporting manager can approve/reject (not admin)
+        if (userRole !== 'admin' && status !== 'cancelled') {
+            const { data: approver } = await supabase
+                .from('employees').select('first_name, last_name')
+                .eq('employee_id', approver_id).single();
+            const approverName = approver ? `${approver.first_name} ${approver.last_name}` : '';
+            if (leave.reporting_manager !== approverName) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Only the assigned reporting manager can approve or reject this leave'
+                });
+            }
+        }
+
+        const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+        const nowIST = new Date(Date.now() + IST_OFFSET_MS);
+        const updatedAtIST = `${nowIST.getUTCFullYear()}-${String(nowIST.getUTCMonth()+1).padStart(2,'0')}-${String(nowIST.getUTCDate()).padStart(2,'0')} ${String(nowIST.getUTCHours()).padStart(2,'0')}:${String(nowIST.getUTCMinutes()).padStart(2,'0')}:${String(nowIST.getUTCSeconds()).padStart(2,'0')}`;
 
         const updateData = {
-            status: status,
+            status,
             remarks: remarks || null,
-            updated_at: new Date().toISOString()
+            updated_at: updatedAtIST,
+            approved_by: approver_id || null,
+            approved_date: status === 'approved' ? new Date().toISOString().split('T')[0] : null
         };
 
-        if (approver_id) {
-            updateData.approved_by = approver_id;
-            updateData.approved_date = status === 'approved' ? new Date().toISOString().split('T')[0] : null;
-        }
-
         const { data: updatedLeave, error: updateError } = await supabase
-            .from('leaves')
-            .update(updateData)
-            .eq('id', id)
-            .select();
-
+            .from('leaves').update(updateData).eq('id', id).select();
         if (updateError) throw updateError;
 
-        if (status === 'approved' && leave.leave_type === 'Comp-Off') {
-            await supabase
-                .from('employees')
-                .update({
-                    comp_off_balance: supabase.raw('COALESCE(comp_off_balance, 0) - ?', [leave.days_count])
-                })
-                .eq('employee_id', leave.employee_id);
+        // On approval: immediately deduct from leave balance
+        if (status === 'approved') {
+            const today = new Date();
+            const leaveYear = today.getFullYear();
+
+            if (leave.leave_type === 'Comp-Off') {
+                // Deduct from comp_off_balance
+                const { data: emp } = await supabase
+                    .from('employees').select('comp_off_balance').eq('employee_id', leave.employee_id).single();
+                const newBalance = Math.max(0, (emp?.comp_off_balance || 0) - (leave.days_count || 1));
+                await supabase.from('employees')
+                    .update({ comp_off_balance: newBalance })
+                    .eq('employee_id', leave.employee_id);
+            } else if (leave.leave_type !== 'Unpaid') {
+                // Deduct from leave_balance
+                const { data: bal } = await supabase
+                    .from('leave_balance').select('*')
+                    .eq('employee_id', leave.employee_id).eq('leave_year', leaveYear).maybeSingle();
+                if (bal) {
+                    const newUsed = (bal.total_used || 0) + (leave.days_count || 1);
+                    const newBalance = Math.max(0, (bal.total_accrued || 0) - newUsed - (bal.total_pending || 0));
+                    await supabase.from('leave_balance').update({
+                        total_used: newUsed,
+                        current_balance: newBalance,
+                        last_updated: new Date().toISOString()
+                    }).eq('employee_id', leave.employee_id).eq('leave_year', leaveYear);
+                }
+            }
         }
 
-        res.json({
-            success: true,
-            message: `Leave request ${status} successfully`,
-            leave: updatedLeave[0]
-        });
+        res.json({ success: true, message: `Leave ${status} successfully`, leave: updatedLeave[0] });
 
     } catch (error) {
         console.error('❌ Error updating leave status:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to update leave status',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Failed to update leave status', error: error.message });
     }
 };
 

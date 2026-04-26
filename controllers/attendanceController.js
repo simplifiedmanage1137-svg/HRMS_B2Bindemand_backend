@@ -84,7 +84,6 @@ const calculateOvertime = (totalHours, shiftHours) => {
     };
 };
 
-// ─── IST UTILITIES (single source of truth) ───────────────────────────────
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 // Current time as IST string "YYYY-MM-DD HH:MM:SS"

@@ -41,46 +41,58 @@ const setEmployeeContext = async (employeeId, role) => {
 };
 
 const getCycleDates = (month, year) => {
-    // Salary for month X = cycle from (X-1)/26 to X/25
-    // e.g., May salary = April 26 to May 25
-    const cycleStart = new Date(year, month - 2, 26); // Previous month 26th
-    const cycleEnd = new Date(year, month - 1, 25);   // Current month 25th
+    // April salary = 26 Mar to 25 Apr
+    // month=4, year=2026 → start: 2026-03-26, end: 2026-04-25
+    const startMonth = month - 1; // previous month (1-based)
+    const startYear  = startMonth === 0 ? year - 1 : year;
+    const actualStartMonth = startMonth === 0 ? 12 : startMonth;
+
+    // Build date strings directly to avoid UTC offset shifting
+    const pad = (n) => String(n).padStart(2, '0');
+    const startDateStr = `${startYear}-${pad(actualStartMonth)}-26`;
+    const endDateStr   = `${year}-${pad(month)}-25`;
 
     return {
-        startDate: cycleStart,
-        endDate: cycleEnd,
-        startDateStr: cycleStart.toISOString().split('T')[0],
-        endDateStr: cycleEnd.toISOString().split('T')[0]
+        startDate:    new Date(`${startDateStr}T00:00:00`),
+        endDate:      new Date(`${endDateStr}T00:00:00`),
+        startDateStr,
+        endDateStr
     };
 };
 
 const getCurrentCycle = () => {
     const today = new Date();
-    let cycleStart, cycleEnd;
+    const pad = (n) => String(n).padStart(2, '0');
+    let startYear, startMonth, endYear, endMonth;
 
     if (today.getDate() >= 26) {
-        // On/after 26th: current cycle is this month 26th to next month 25th
-        cycleStart = new Date(today.getFullYear(), today.getMonth(), 26);
-        cycleEnd = new Date(today.getFullYear(), today.getMonth() + 1, 25);
+        startYear  = today.getFullYear();
+        startMonth = today.getMonth() + 1; // current month
+        endYear    = startMonth === 12 ? startYear + 1 : startYear;
+        endMonth   = startMonth === 12 ? 1 : startMonth + 1;
     } else {
-        // Before 26th: current cycle is prev month 26th to this month 25th
-        cycleStart = new Date(today.getFullYear(), today.getMonth() - 1, 26);
-        cycleEnd = new Date(today.getFullYear(), today.getMonth(), 25);
+        endYear    = today.getFullYear();
+        endMonth   = today.getMonth() + 1; // current month
+        startYear  = endMonth === 1 ? endYear - 1 : endYear;
+        startMonth = endMonth === 1 ? 12 : endMonth - 1;
     }
 
+    const startDateStr = `${startYear}-${pad(startMonth)}-26`;
+    const endDateStr   = `${endYear}-${pad(endMonth)}-25`;
+
     return {
-        startDate: cycleStart,
-        endDate: cycleEnd,
-        startDateStr: cycleStart.toISOString().split('T')[0],
-        endDateStr: cycleEnd.toISOString().split('T')[0],
-        monthName: cycleEnd.toLocaleString('default', { month: 'long' }),
-        year: cycleEnd.getFullYear()
+        startDate:    new Date(`${startDateStr}T00:00:00`),
+        endDate:      new Date(`${endDateStr}T00:00:00`),
+        startDateStr,
+        endDateStr,
+        monthName: new Date(`${endDateStr}T00:00:00`).toLocaleString('default', { month: 'long' }),
+        year: endYear
     };
 };
 
 exports.generateSalarySlip = async (req, res) => {
     try {
-        const { employee_id, month, year, overtime_amount, overtime_hours } = req.body;
+        const { employee_id, month, year } = req.body;
 
         if (!employee_id || !month || !year) {
             return res.status(400).json({ success: false, message: 'Employee ID, month, and year are required' });
@@ -88,13 +100,31 @@ exports.generateSalarySlip = async (req, res) => {
 
         const tableExists = await checkTableExists('salary_slips');
         if (!tableExists) {
-            return res.status(500).json({ success: false, message: 'Salary slips table not created yet. Please contact admin.' });
+            return res.status(500).json({ success: false, message: 'Salary slips table not created yet.' });
         }
 
         const { data: employee, error: empError } = await supabase
             .from('employees').select('*').eq('employee_id', employee_id).single();
         if (empError || !employee) {
             return res.status(404).json({ success: false, message: 'Employee not found' });
+        }
+
+        // Cycle dates: prev month 26th to current month 25th
+        const cycle = getCycleDates(parseInt(month), parseInt(year));
+
+        // ── RULE: Salary slip can only be generated from 27th of the salary month ──
+        const today = new Date();
+        const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+        const cycleEndMonth = parseInt(month);
+        const cycleEndYear  = parseInt(year);
+        // Earliest allowed date = cycleEnd + 2 days = 27th of salary month
+        const allowedFrom = new Date(`${cycleEndYear}-${String(cycleEndMonth).padStart(2,'0')}-27T00:00:00`);
+        if (today < allowedFrom) {
+            const allowedDateStr = `27 ${new Date(allowedFrom).toLocaleString('en-IN',{month:'long'})} ${cycleEndYear}`;
+            return res.status(400).json({
+                success: false,
+                message: `Salary slip for ${new Date(allowedFrom).toLocaleString('en-IN',{month:'long'})} ${cycleEndYear} can only be generated from ${allowedDateStr}.`
+            });
         }
 
         // Check existing slip
@@ -105,56 +135,94 @@ exports.generateSalarySlip = async (req, res) => {
             return res.json({ success: true, message: 'Salary slip already exists', salarySlip: existingSlip });
         }
 
-        // Cycle dates: 26th prev month to 25th current month
-        const cycle = getCycleDates(month, year);
-
-        // Count working days in cycle (Mon-Fri only = 5-day week)
+        // ── Count total working days (Mon-Fri) in cycle ──
         let totalWorkingDays = 0;
-        let currentDate = new Date(cycle.startDate);
-        while (currentDate <= cycle.endDate) {
-            const dow = currentDate.getDay();
-            if (dow !== 0 && dow !== 6) totalWorkingDays++; // Mon-Fri
-            currentDate.setDate(currentDate.getDate() + 1);
+        let d = new Date(`${cycle.startDateStr}T00:00:00`);
+        const cycleEndDate = new Date(`${cycle.endDateStr}T00:00:00`);
+        while (d <= cycleEndDate) {
+            const dow = d.getDay();
+            if (dow !== 0 && dow !== 6) totalWorkingDays++;
+            d.setDate(d.getDate() + 1);
         }
 
-        // Get approved unpaid leaves in cycle
+        // ── Get attendance records in cycle ──
+        const { data: attendanceRecords } = await supabase
+            .from('attendance')
+            .select('attendance_date, clock_in, clock_out, status, total_minutes')
+            .eq('employee_id', employee_id)
+            .gte('attendance_date', cycle.startDateStr)
+            .lte('attendance_date', cycle.endDateStr);
+
+        // Count present days (has clock_in + clock_out)
+        const presentDays = (attendanceRecords || []).filter(a =>
+            a.clock_in && a.clock_out
+        ).length;
+
+        // ── Get approved leaves in cycle ──
         const { data: leaves } = await supabase
-            .from('leave_requests')
-            .select('*')
+            .from('leaves')
+            .select('leave_type, start_date, end_date, days_count, leave_duration')
             .eq('employee_id', employee_id)
             .eq('status', 'approved')
-            .eq('leave_type', 'Unpaid')
             .lte('start_date', cycle.endDateStr)
             .gte('end_date', cycle.startDateStr);
 
         // Count unpaid leave days (Mon-Fri only within cycle)
         let unpaidLeaveDays = 0;
+        let paidLeaveDays   = 0;
         for (const leave of (leaves || [])) {
-            let d = new Date(Math.max(new Date(leave.start_date), cycle.startDate));
-            const leaveEnd = new Date(Math.min(new Date(leave.end_date), cycle.endDate));
-            while (d <= leaveEnd) {
-                const dow = d.getDay();
-                if (dow !== 0 && dow !== 6) unpaidLeaveDays++;
-                d.setDate(d.getDate() + 1);
+            const isUnpaid = leave.leave_type === 'Unpaid';
+            const isHalfDay = leave.leave_duration === 'Half Day';
+
+            if (isHalfDay) {
+                if (isUnpaid) unpaidLeaveDays += 0.5;
+                else paidLeaveDays += 0.5;
+                continue;
+            }
+
+            // Count Mon-Fri days within cycle overlap
+            let ld = new Date(Math.max(new Date(`${leave.start_date}T00:00:00`), new Date(`${cycle.startDateStr}T00:00:00`)));
+            const leaveEnd = new Date(Math.min(new Date(`${leave.end_date}T00:00:00`), cycleEndDate));
+            while (ld <= leaveEnd) {
+                const dow = ld.getDay();
+                if (dow !== 0 && dow !== 6) {
+                    if (isUnpaid) unpaidLeaveDays++;
+                    else paidLeaveDays++;
+                }
+                ld.setDate(ld.getDate() + 1);
             }
         }
 
-        // Salary calculation based on 5-day week
+        // Absent days = working days - present - paid leave - unpaid leave
+        const absentDays = Math.max(0, totalWorkingDays - presentDays - paidLeaveDays - unpaidLeaveDays);
+
+        // ── Get OT for the cycle period ──
+        const { data: otRecords } = await supabase
+            .from('attendance')
+            .select('overtime_hours, overtime_amount, attendance_date')
+            .eq('employee_id', employee_id)
+            .gte('attendance_date', cycle.startDateStr)
+            .lte('attendance_date', cycle.endDateStr)
+            .gt('overtime_hours', 0);
+
+        const overtimeHrs = (otRecords || []).reduce((sum, r) => sum + (parseFloat(r.overtime_hours) || 0), 0);
+        const overtimeAmt = parseFloat((overtimeHrs * 150).toFixed(2));
+
+        // ── Salary calculation ──
         const monthlySalary = parseFloat(employee.gross_salary || employee.salary || 0);
-        // Per day = monthly salary / total working days in cycle (all Mon-Fri)
-        const perDaySalary = totalWorkingDays > 0 ? monthlySalary / totalWorkingDays : 0;
+        const perDaySalary  = totalWorkingDays > 0 ? monthlySalary / totalWorkingDays : 0;
+
+        // Deduct unpaid leave days only (paid leaves don't reduce salary)
         const unpaidDeduction = parseFloat((unpaidLeaveDays * perDaySalary).toFixed(2));
-        const basicSalary = parseFloat((monthlySalary - unpaidDeduction).toFixed(2));
-        const dtDeduction = 200;
-        const overtimeAmt = parseFloat(overtime_amount) || 0;
-        const overtimeHrs = parseFloat(overtime_hours) || 0;
-        const netSalary = parseFloat((basicSalary - dtDeduction + overtimeAmt).toFixed(2));
+        const basicSalary     = parseFloat((monthlySalary - unpaidDeduction).toFixed(2));
+        const dtDeduction     = 200;
+        const netSalary       = parseFloat((basicSalary - dtDeduction + overtimeAmt).toFixed(2));
 
         console.log('📊 Salary Calculation:', {
-            monthlySalary, totalWorkingDays, perDaySalary,
-            unpaidLeaveDays, unpaidDeduction, basicSalary,
-            dtDeduction, overtimeAmt, netSalary,
-            cycle: `${cycle.startDateStr} to ${cycle.endDateStr}`
+            cycle: `${cycle.startDateStr} to ${cycle.endDateStr}`,
+            totalWorkingDays, presentDays, paidLeaveDays, unpaidLeaveDays, absentDays,
+            monthlySalary, perDaySalary, unpaidDeduction, basicSalary,
+            overtimeHrs, overtimeAmt, dtDeduction, netSalary
         });
 
         const { data: salarySlip, error: insertError } = await supabase
@@ -162,19 +230,22 @@ exports.generateSalarySlip = async (req, res) => {
             .insert([{
                 employee_id, month, year,
                 cycle_start_date: cycle.startDateStr,
-                cycle_end_date: cycle.endDateStr,
+                cycle_end_date:   cycle.endDateStr,
                 total_working_days: totalWorkingDays,
-                unpaid_leave_days: unpaidLeaveDays,
-                per_day_salary: parseFloat(perDaySalary.toFixed(2)),
-                unpaid_deduction: unpaidDeduction,
-                monthly_salary: monthlySalary,
-                basic_salary: basicSalary,
-                dt: dtDeduction,
-                overtime_hours: overtimeHrs,
-                overtime_amount: overtimeAmt,
-                net_salary: netSalary,
-                generated_date: new Date().toISOString(),
-                is_paid: false
+                present_days:       presentDays,
+                paid_leave_days:    paidLeaveDays,
+                unpaid_leave_days:  unpaidLeaveDays,
+                absent_days:        absentDays,
+                per_day_salary:     parseFloat(perDaySalary.toFixed(2)),
+                unpaid_deduction:   unpaidDeduction,
+                monthly_salary:     monthlySalary,
+                basic_salary:       basicSalary,
+                dt:                 dtDeduction,
+                overtime_hours:     overtimeHrs,
+                overtime_amount:    overtimeAmt,
+                net_salary:         netSalary,
+                generated_date:     new Date().toISOString(),
+                is_paid:            false
             }])
             .select().single();
 
