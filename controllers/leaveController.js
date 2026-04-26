@@ -320,12 +320,26 @@ exports.getLeaves = async (req, res) => {
             // Admin: all leaves, only view (no approve/reject from here)
             if (req.query.employee_id) query = query.eq('employee_id', req.query.employee_id);
         } else if (isReportingManager) {
-            // Reporting manager: only leaves where they are the reporting_manager
+            // Reporting manager: leaves where reporting_manager matches OR
+            // employee's reporting_manager in employees table matches (for old leaves with null reporting_manager)
             const { data: emp } = await supabase
                 .from('employees').select('first_name, last_name')
                 .eq('employee_id', authenticatedUserId).single();
             const managerName = emp ? `${emp.first_name} ${emp.last_name}` : '';
-            query = query.eq('reporting_manager', managerName);
+
+            // Get all employee_ids who report to this manager
+            const { data: teamEmps } = await supabase
+                .from('employees')
+                .select('employee_id')
+                .eq('reporting_manager', managerName);
+            const teamIds = (teamEmps || []).map(e => e.employee_id);
+
+            if (teamIds.length === 0) {
+                return res.json([]);
+            }
+
+            // Fetch leaves where employee is in team (covers both null and set reporting_manager)
+            query = query.in('employee_id', teamIds);
         } else {
             // Employee: own leaves only
             if (!authenticatedUserId) return res.json([]);
