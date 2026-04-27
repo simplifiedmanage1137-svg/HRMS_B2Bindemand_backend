@@ -317,6 +317,12 @@ exports.getLeaves = async (req, res) => {
     try {
         const authenticatedUserId = req.user?.employeeId;
         const userRole = req.user?.role;
+        
+        console.log('🔍 getLeaves called with:', {
+            authenticatedUserId,
+            userRole,
+            query: req.query
+        });
 
         let query = supabase
             .from('leaves')
@@ -324,12 +330,13 @@ exports.getLeaves = async (req, res) => {
 
         const isAdmin = userRole === 'admin' && req.query.all === 'true';
         const isReportingManager = req.query.reporting_manager === 'true';
+        
+        console.log('🔍 Query flags:', { isAdmin, isReportingManager });
 
         if (isAdmin) {
-            // Admin: all leaves
-            // If ?team_leader=true → only show team leader/manager leaves (for approve/reject)
-            // Otherwise show all leaves (view only)
+            // Admin: all leaves or filtered leaves
             if (req.query.team_leader === 'true') {
+                console.log('🔍 Admin requesting team leader leaves only');
                 // Fetch only team leader/manager employees
                 const { data: allEmps } = await supabase
                     .from('employees').select('employee_id, designation');
@@ -339,6 +346,8 @@ exports.getLeaves = async (req, res) => {
                 if (tlIds.length === 0) return res.json([]);
                 query = query.in('employee_id', tlIds);
             } else {
+                console.log('🔍 Admin requesting all leaves');
+                // Show all leaves for admin (no filtering by team leader)
                 if (req.query.employee_id) query = query.eq('employee_id', req.query.employee_id);
             }
         } else if (isReportingManager) {
@@ -371,6 +380,8 @@ exports.getLeaves = async (req, res) => {
         query = query.order('created_at', { ascending: false });
         const { data: leaves, error } = await query;
         if (error) throw error;
+        
+        console.log('✅ Leaves fetched successfully:', leaves?.length || 0, 'records');
 
         const formatted = (leaves || []).map(l => ({
             ...l,
@@ -380,6 +391,8 @@ exports.getLeaves = async (req, res) => {
             designation: l.employees?.designation || '',
             employees: undefined
         }));
+        
+        console.log('✅ Returning formatted leaves:', formatted.length, 'records');
 
         res.json(formatted);
     } catch (error) {
@@ -407,34 +420,16 @@ exports.updateLeaveStatus = async (req, res) => {
         }
 
         // Authorization logic:
+        // - Admin can approve/reject any leave request
         // - Team Leader/Manager employee's leave: only admin can approve/reject
-        // - Regular employee's leave: only their reporting manager can approve/reject
-        // - Admin can always approve/reject team leader leaves
+        // - Regular employee's leave: their reporting manager or admin can approve/reject
         // - Employee can cancel their own leave
         if (status === 'cancelled') {
             // Employee cancelling own leave - allow
         } else if (userRole === 'admin') {
-            // Admin approving - verify it's a team leader's leave
-            const { data: leaveEmp } = await supabase
-                .from('employees').select('designation')
-                .eq('employee_id', leave.employee_id).single();
-            if (!isTeamLeaderDesignation(leaveEmp?.designation)) {
-                return res.status(403).json({
-                    success: false,
-                    message: 'Admin can only approve/reject Team Leader or Manager leave requests. Regular employee leaves must be approved by their reporting manager.'
-                });
-            }
+            // Admin can approve/reject any leave request
         } else {
-            // Non-admin: must be the reporting manager of a regular (non-TL) employee
-            const { data: leaveEmp } = await supabase
-                .from('employees').select('designation')
-                .eq('employee_id', leave.employee_id).single();
-            if (isTeamLeaderDesignation(leaveEmp?.designation)) {
-                return res.status(403).json({
-                    success: false,
-                    message: 'Team Leader/Manager leave requests can only be approved by Admin.'
-                });
-            }
+            // Non-admin: must be the reporting manager of the employee
             const { data: approver } = await supabase
                 .from('employees').select('first_name, last_name')
                 .eq('employee_id', approver_id).single();
@@ -447,7 +442,7 @@ exports.updateLeaveStatus = async (req, res) => {
             if (empReportingManager !== approverName) {
                 return res.status(403).json({
                     success: false,
-                    message: 'Only the assigned reporting manager can approve or reject this leave'
+                    message: 'Only the assigned reporting manager or admin can approve or reject this leave'
                 });
             }
         }
