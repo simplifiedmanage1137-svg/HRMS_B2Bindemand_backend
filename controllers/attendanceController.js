@@ -1993,4 +1993,44 @@ exports.updateHistoricalLateMarks = async (req, res) => {
     }
 };
 
+// Mark absent employees as leave (manual trigger)
+exports.markAbsentEmployeesAsLeave = async (req, res) => {
+    try {
+        console.log('🔄 Manual trigger: markAbsentEmployeesAsLeave called');
+        
+        const { markAbsentEmployeesAsLeave } = require('../cron/absentEmployeeCheck');
+        const result = await markAbsentEmployeesAsLeave();
+        
+        console.log('📊 Result from cron function:', result);
+        
+        if (result.success) {
+            res.json({
+                success: true,
+                message: result.message,
+                data: {
+                    date: result.date,
+                    totalEmployees: result.totalEmployees,
+                    absentCount: result.absentCount,
+                    leaveCreatedCount: result.leaveCreatedCount,
+                    skippedCount: result.skippedCount
+                }
+            });
+        } else {
+            console.error('❌ Cron function returned error:', result.error);
+            res.status(500).json({
+                success: false,
+                message: 'Failed to process absent employees',
+                error: result.error
+            });
+        }
+    } catch (error) {
+        console.error('❌ Error in markAbsentEmployeesAsLeave API:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to process absent employees',
+            error: error.message
+        });
+    }
+};
+
 module.exports = exports;

@@ -31,6 +31,9 @@ const announcementRoutes = require('./routes/announcementRoutes');
 // Import attendance controller for cron jobs
 const attendanceController = require('./controllers/attendanceController');
 
+// Import absent employee check cron job
+const { scheduleAbsentCheck } = require('./cron/absentEmployeeCheck');
+
 // Initialize Express app
 const app = express();
 
@@ -392,6 +395,9 @@ cron.schedule('59 23 * * *', async () => {
     }
 });
 
+// Initialize absent employee check cron job
+scheduleAbsentCheck();
+
 // Run database cleanup weekly (Sunday at 2 AM)
 cron.schedule('0 2 * * 0', async () => {
     console.log('\n🧹 Running weekly database cleanup...');
@@ -433,6 +439,7 @@ cron.schedule('0 2 * * 0', async () => {
 console.log('✅ Cron jobs configured:');
 console.log('   - Hourly: Auto-close stale sessions');
 console.log('   - Daily at 23:59: End-of-day absent marking');
+console.log('   - Daily at 23:59: Mark absent employees as leave');
 console.log('   - Weekly on Sunday at 02:00: Database cleanup');
 
 // ============== ERROR HANDLING MIDDLEWARE ==============

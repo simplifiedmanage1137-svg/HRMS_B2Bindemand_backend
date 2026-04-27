@@ -335,21 +335,12 @@ exports.getLeaves = async (req, res) => {
 
         if (isAdmin) {
             // Admin: all leaves or filtered leaves
-            if (req.query.team_leader === 'true') {
-                console.log('🔍 Admin requesting team leader leaves only');
-                // Fetch only team leader/manager employees
-                const { data: allEmps } = await supabase
-                    .from('employees').select('employee_id, designation');
-                const tlIds = (allEmps || [])
-                    .filter(e => isTeamLeaderDesignation(e.designation))
-                    .map(e => e.employee_id);
-                if (tlIds.length === 0) return res.json([]);
-                query = query.in('employee_id', tlIds);
-            } else {
-                console.log('🔍 Admin requesting all leaves');
-                // Show all leaves for admin (no filtering by team leader)
-                if (req.query.employee_id) query = query.eq('employee_id', req.query.employee_id);
+            console.log('🔍 Admin requesting all leaves');
+            // Show all leaves for admin (no filtering by team leader)
+            if (req.query.employee_id) {
+                query = query.eq('employee_id', req.query.employee_id);
             }
+            // No additional filtering for admin when all=true
         } else if (isReportingManager) {
             // Reporting manager: leaves where reporting_manager matches OR
             // employee's reporting_manager in employees table matches (for old leaves with null reporting_manager)
@@ -379,7 +370,10 @@ exports.getLeaves = async (req, res) => {
 
         query = query.order('created_at', { ascending: false });
         const { data: leaves, error } = await query;
-        if (error) throw error;
+        if (error) {
+            console.error('❌ Database error in getLeaves:', error);
+            throw error;
+        }
         
         console.log('✅ Leaves fetched successfully:', leaves?.length || 0, 'records');
 
@@ -393,11 +387,17 @@ exports.getLeaves = async (req, res) => {
         }));
         
         console.log('✅ Returning formatted leaves:', formatted.length, 'records');
+        console.log('📊 Sample leave data:', formatted.slice(0, 2));
 
         res.json(formatted);
     } catch (error) {
         console.error('❌ Error in getLeaves:', error);
-        res.status(500).json({ success: false, message: 'Error fetching leaves', error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            message: 'Error fetching leaves', 
+            error: error.message,
+            leaves: [] // Return empty array on error
+        });
     }
 };
 
