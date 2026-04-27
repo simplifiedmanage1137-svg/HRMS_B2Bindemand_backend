@@ -68,35 +68,37 @@ router.get('/', async (req, res) => {
     try {
         const user_id = req.user?.employeeId;
         const user_role = req.user?.role;
-
-        let query = supabase.from('employee_notices').select('*');
+        const type = req.query.type; // 'received' | 'sent' | undefined (all)
 
         if (user_role === 'admin') {
-            // Admin sees all notices they sent
-            query = query.eq('sent_by_id', user_id);
-        } else {
-            // Check if team leader - see notices they sent + notices they received
-            const { data: emp } = await supabase
-                .from('employees').select('designation').eq('employee_id', user_id).single();
-
-            if (isTeamLeader(emp?.designation)) {
-                // Team leader sees notices they sent OR received
-                const { data: sent } = await supabase.from('employee_notices').select('*').eq('sent_by_id', user_id).order('created_at', { ascending: false });
-                const { data: received } = await supabase.from('employee_notices').select('*').eq('employee_id', user_id).order('created_at', { ascending: false });
-                const all = [...(sent || []), ...(received || [])];
-                const unique = all.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
-                unique.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-                return res.json({ success: true, notices: unique });
-            } else {
-                // Regular employee sees only their own notices
-                query = query.eq('employee_id', user_id);
-            }
+            // Admin: only sent notices
+            const { data, error } = await supabase
+                .from('employee_notices').select('*')
+                .eq('sent_by_id', user_id)
+                .order('created_at', { ascending: false });
+            if (error) throw error;
+            return res.json({ success: true, notices: data || [] });
         }
 
-        query = query.order('created_at', { ascending: false });
-        const { data, error } = await query;
+        // Employee / Team Leader
+        if (type === 'sent') {
+            // Only notices this user sent
+            const { data, error } = await supabase
+                .from('employee_notices').select('*')
+                .eq('sent_by_id', user_id)
+                .order('created_at', { ascending: false });
+            if (error) throw error;
+            return res.json({ success: true, notices: data || [] });
+        }
+
+        // type === 'received' OR no type — only notices addressed TO this user
+        const { data, error } = await supabase
+            .from('employee_notices').select('*')
+            .eq('employee_id', user_id)
+            .order('created_at', { ascending: false });
         if (error) throw error;
         res.json({ success: true, notices: data || [] });
+
     } catch (error) {
         console.error('Error fetching notices:', error);
         res.status(500).json({ success: false, message: 'Failed to fetch notices', error: error.message });
