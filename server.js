@@ -25,6 +25,8 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const adminUpdateRoutes = require('./routes/adminUpdateRoutes');
 const employeeUpdateRoutes = require('./routes/employeeUpdateRoutes');
 const updateResponseRoutes = require('./routes/updateResponseRoutes');
+const noticeRoutes = require('./routes/noticeRoutes');
+const announcementRoutes = require('./routes/announcementRoutes');
 
 // Import attendance controller for cron jobs
 const attendanceController = require('./controllers/attendanceController');
@@ -136,6 +138,7 @@ const { uploadsDir } = createUploadDirectories();
 
 // Serve static files
 app.use('/uploads', express.static(uploadsDir));
+app.use('/uploads/announcements', express.static(path.join(__dirname, 'uploads/announcements')));
 
 // ============== MULTER CONFIGURATION ==============
 const documentStorage = multer.diskStorage({
@@ -223,6 +226,8 @@ app.use('/api/notifications', authenticateToken, notificationRoutes);
 app.use('/api/admin-updates', authenticateToken, adminUpdateRoutes);
 app.use('/api/employee-updates', authenticateToken, employeeUpdateRoutes);
 app.use('/api/update-responses', authenticateToken, updateResponseRoutes);
+app.use('/api/notices', authenticateToken, noticeRoutes);
+app.use('/api/announcements', authenticateToken, announcementRoutes);
 
 // Make uploadDocuments available to routes
 app.locals.uploadDocuments = uploadDocuments;

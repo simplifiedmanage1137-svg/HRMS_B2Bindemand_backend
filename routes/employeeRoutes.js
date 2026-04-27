@@ -126,16 +126,22 @@ router.get('/manager/team', verifyToken, async (req, res) => {
             .eq('employee_id', managerEmployeeId).single();
         if (mErr || !manager) return res.status(404).json({ success: false, message: 'Manager not found' });
 
-        const managerName = `${manager.first_name} ${manager.last_name}`;
+        const managerName = `${manager.first_name} ${manager.last_name}`.trim();
 
-        const { data: team, error } = await supabase
+        // Fetch team members - trim stored values to handle any whitespace issues
+        const { data: allEmps, error } = await supabase
             .from('employees')
             .select('id, employee_id, first_name, last_name, department, designation, shift_timing, reporting_manager')
-            .eq('reporting_manager', managerName)
             .order('first_name', { ascending: true });
 
         if (error) throw error;
-        res.json({ success: true, team: team || [], manager_name: managerName });
+
+        // Filter in JS: trim + lowercase compare to handle any DB whitespace/case issues
+        const team = (allEmps || []).filter(e =>
+            e.reporting_manager?.trim().toLowerCase() === managerName.toLowerCase()
+        );
+
+        res.json({ success: true, team, manager_name: managerName });
     } catch (error) {
         console.error('Error fetching team:', error);
         res.status(500).json({ success: false, message: 'Failed to fetch team', error: error.message });
@@ -158,14 +164,14 @@ router.put('/manager/shift/:employee_id', verifyToken, async (req, res) => {
             .eq('employee_id', managerEmployeeId).single();
         if (mErr || !manager) return res.status(403).json({ success: false, message: 'Manager not found' });
 
-        const managerName = `${manager.first_name} ${manager.last_name}`;
+        const managerName = `${manager.first_name} ${manager.last_name}`.trim();
 
         const { data: emp, error: empErr } = await supabase
             .from('employees').select('employee_id, first_name, last_name, reporting_manager')
             .eq('employee_id', employee_id).single();
         if (empErr || !emp) return res.status(404).json({ success: false, message: 'Employee not found' });
 
-        if (emp.reporting_manager !== managerName) {
+        if (emp.reporting_manager?.trim().toLowerCase() !== managerName.toLowerCase()) {
             return res.status(403).json({ success: false, message: 'You can only update shift for employees who report to you' });
         }
 
