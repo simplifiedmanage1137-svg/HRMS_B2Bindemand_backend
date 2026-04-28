@@ -986,7 +986,32 @@ exports.getAttendanceReport = async (req, res) => {
         const { data: attendance, error: attendanceError } = await query;
         if (attendanceError) throw attendanceError;
 
-        const formattedAttendance = (attendance || []).map(record => {
+        const dedupedAttendanceMap = {};
+        (attendance || []).forEach(record => {
+            const dateKey = record.attendance_date ? record.attendance_date.split('T')[0] : record.attendance_date;
+            const key = `${record.employee_id}-${dateKey}`;
+            const existing = dedupedAttendanceMap[key];
+            if (!existing) {
+                dedupedAttendanceMap[key] = record;
+                return;
+            }
+
+            const existingClockOut = existing.clock_out_ist || existing.clock_out;
+            const newClockOut = record.clock_out_ist || record.clock_out;
+            if (newClockOut && !existingClockOut) {
+                dedupedAttendanceMap[key] = record;
+            } else if (newClockOut && existingClockOut) {
+                const existingMs = toUTCMs(existingClockOut);
+                const newMs = toUTCMs(newClockOut);
+                if (newMs > existingMs) {
+                    dedupedAttendanceMap[key] = record;
+                }
+            } else if (!existingClockOut && !newClockOut) {
+                dedupedAttendanceMap[key] = record;
+            }
+        });
+
+        const formattedAttendance = (Object.values(dedupedAttendanceMap) || []).map(record => {
             const employee = record.employees || {};
             let totalHoursDisplay = '0h 0m';
             if (record.total_minutes) {
