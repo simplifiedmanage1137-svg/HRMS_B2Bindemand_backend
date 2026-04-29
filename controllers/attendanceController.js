@@ -772,9 +772,37 @@ exports.getTodayAttendance = async (req, res) => {
             .select('*')
             .eq('employee_id', employee_id)
             .eq('is_active', true);
+        
         let formattedAttendance = null;
-        if (todayAttendance && todayAttendance.length > 0) {
-            formattedAttendance = { ...todayAttendance[0] };
+        
+        // If there's an active session, also check for the associated attendance record
+        let activeSessionAttendance = null;
+        if (activeSession && activeSession.length > 0) {
+            const session = activeSession[0];
+            const { data: sessionAttendance } = await supabase
+                .from('attendance')
+                .select('*, employees!inner(first_name, last_name, shift_timing, comp_off_balance)')
+                .eq('employee_id', employee_id)
+                .eq('session_id', session.session_id)
+                .order('clock_in', { ascending: false })
+                .limit(1);
+            
+            if (sessionAttendance && sessionAttendance.length > 0) {
+                activeSessionAttendance = sessionAttendance[0];
+                if (activeSessionAttendance.employees) {
+                    activeSessionAttendance.first_name = activeSessionAttendance.employees.first_name;
+                    activeSessionAttendance.last_name = activeSessionAttendance.employees.last_name;
+                    activeSessionAttendance.shift_timing = activeSessionAttendance.employees.shift_timing;
+                    delete activeSessionAttendance.employees;
+                }
+            }
+        }
+        
+        // Use today's attendance if it exists, otherwise use active session attendance
+        const attendanceToProcess = todayAttendance && todayAttendance.length > 0 ? todayAttendance[0] : activeSessionAttendance;
+        
+        if (attendanceToProcess) {
+            formattedAttendance = { ...attendanceToProcess };
             if (formattedAttendance.employees) {
                 formattedAttendance.first_name = formattedAttendance.employees.first_name;
                 formattedAttendance.last_name = formattedAttendance.employees.last_name;
