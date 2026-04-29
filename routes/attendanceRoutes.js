@@ -23,10 +23,11 @@ module.exports = (supabase, authenticateToken, requireAdmin) => {
     // Admin-only attendance report (full access)
     router.get('/report', authenticateToken, requireAdmin, attendanceController.getAttendanceReport);
 
-    // Regularization endpoints (Admin only) - MUST be before /:employee_id routes
-    router.get('/regularization/pending', authenticateToken, requireAdmin, attendanceController.getPendingRegularizations);
-    router.put('/regularization/:request_id/approve', authenticateToken, requireAdmin, attendanceController.approveRegularization);
-    router.put('/regularization/:request_id/reject', authenticateToken, requireAdmin, attendanceController.rejectRegularization);
+    // Regularization endpoints
+    // Managers and admins can view and act on regularization requests according to team-level approval rules.
+    router.get('/regularization/pending', authenticateToken, attendanceController.getPendingRegularizations);
+    router.put('/regularization/:request_id/approve', authenticateToken, attendanceController.approveRegularization);
+    router.put('/regularization/:request_id/reject', authenticateToken, attendanceController.rejectRegularization);
 
     // Overtime endpoints (Admin or own data)
     router.get('/overtime/:employee_id/:month/:year', authenticateToken, attendanceController.getOvertimeSummary);
