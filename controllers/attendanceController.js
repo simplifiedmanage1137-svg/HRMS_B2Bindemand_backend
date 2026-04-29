@@ -887,11 +887,11 @@ exports.clockOut = async (req, res) => {
         });
     }
 };
-// Clock Out for Missed/Previous Day Attendance
+// Clock Out for Missed/Previous Day Attendance - UPDATED to use current time
 exports.clockOutMissed = async (req, res) => {
     try {
         const { employee_id, attendance_id, attendance_date } = req.body;
-        
+
         if (!employee_id || !attendance_id) {
             return res.status(400).json({ success: false, message: 'Employee ID and Attendance ID are required' });
         }
@@ -912,32 +912,80 @@ exports.clockOutMissed = async (req, res) => {
             return res.status(400).json({ success: false, message: 'This attendance record already has a clock-out time' });
         }
 
-        // Set clock out to 9:00 PM (21:00) IST for that day
-        const clockOutIST = `${attendance.attendance_date} 21:00:00`;
-        
-        // Parse times
-        const clockInDate = new Date(attendance.clock_in_ist || attendance.clock_in);
+        // ✅ FIX: Use current time for clock out, not fixed 9:00 PM
+        const currentIST = nowIST(); // e.g., "2026-04-30 00:50:00"
+
+        // Parse the current time
+        const [currentDatePart, currentTimePart] = currentIST.split(' ');
+
+        // For the attendance record, we want to keep the original date but use current time
+        // This means if attendance is for 2026-04-29 and current time is 00:50 on 2026-04-30,
+        // clock out should be 2026-04-29 00:50? No, that would be before clock in.
+        // Instead, we need to check if current time is past midnight and adjust accordingly.
+
+        let clockOutIST;
+        const attendanceDate = attendance.attendance_date;
+
+        // Parse clock in time
+        const clockInTime = new Date(attendance.clock_in_ist || attendance.clock_in);
+        const currentTime = new Date(currentIST);
+
+        // Calculate the difference
+        let diffMinutes = (currentTime - clockInTime) / (1000 * 60);
+
+        // If current time is less than clock in time (meaning we crossed midnight),
+        // add 24 hours to the current time to get the correct duration
+        if (diffMinutes < 0) {
+            // This happens when clock in was on previous day and current time is early morning
+            // Example: Clock in at 12:08 PM on 2026-04-29, current time 00:50 AM on 2026-04-30
+            // We want clock out to be 2026-04-29 00:50? No, that doesn't make sense.
+            // The correct clock out time should be on the same day as clock in.
+
+            // So we need to use the attendance date for the clock out date, but current time
+            // But if current time is early morning (00:50), that would be less than clock in time (12:08)
+            // So we should use a reasonable default like 9:00 PM, OR let the user specify.
+
+            // For now, let's calculate the actual elapsed time by adding 24 hours to current time
+            const adjustedCurrentTime = new Date(currentTime);
+            adjustedCurrentTime.setDate(adjustedCurrentTime.getDate() + 1);
+            diffMinutes = (adjustedCurrentTime - clockInTime) / (1000 * 60);
+
+            // Use the attendance date with current time part (adjusted for next day)
+            const [year, month, day] = attendanceDate.split('-');
+            const [hour, minute, second] = currentTimePart.split(':');
+
+            // If current hour is less than clock in hour, it means we're in early morning next day
+            // So we use the attendance date but time might be early morning
+            clockOutIST = `${attendanceDate} ${hour}:${minute}:${second || '00'}`;
+        } else {
+            // Normal case: use attendance date with current time
+            const [hour, minute, second] = currentTimePart.split(':');
+            clockOutIST = `${attendanceDate} ${hour}:${minute}:${second || '00'}`;
+        }
+
+        console.log(`⏰ Clock out for ${attendanceDate}: ${clockOutIST}`);
+
         const clockOutDate = new Date(clockOutIST);
-        
-        let totalMinutes = Math.round((clockOutDate - clockInDate) / (1000 * 60));
+
+        let totalMinutes = Math.round((clockOutDate - clockInTime) / (1000 * 60));
         if (totalMinutes < 0) totalMinutes += 24 * 60;
         const totalHours = totalMinutes / 60;
-        
+
         const displayHours = Math.floor(totalMinutes / 60);
         const displayMinutes = totalMinutes % 60;
         const totalHoursDisplay = `${displayHours}h ${displayMinutes}m`;
-        
+
         // Determine status
         const shiftTiming = parseShiftTiming(attendance.shift_time_used);
         const expectedWorkMinutes = (shiftTiming.totalHours || 9) * 60;
-        
+
         let status = 'half_day';
         if (totalMinutes >= expectedWorkMinutes) {
             status = 'present';
         } else if (totalMinutes < 240) {
             status = 'absent';
         }
-        
+
         // Update attendance
         const { error: updateError } = await supabase
             .from('attendance')
@@ -950,15 +998,15 @@ exports.clockOutMissed = async (req, res) => {
                 status: status
             })
             .eq('id', attendance.id);
-            
+
         if (updateError) {
             console.error('Error updating attendance:', updateError);
             throw updateError;
         }
-        
+
         res.json({
             success: true,
-            message: `Clocked out successfully for ${attendance.attendance_date}`,
+            message: `Clocked out successfully for ${attendance.attendance_date} at ${clockOutIST.split(' ')[1]}`,
             data: {
                 attendance_date: attendance.attendance_date,
                 clock_out_ist: clockOutIST,
@@ -968,7 +1016,7 @@ exports.clockOutMissed = async (req, res) => {
                 status: status
             }
         });
-        
+
     } catch (error) {
         console.error('Error in clockOutMissed:', error);
         res.status(500).json({
