@@ -391,7 +391,7 @@ exports.autoCloseStaleSessions = async () => {
     }
 };
 
-// Clock In function - ENHANCED for consistent late calculation
+// Clock In function - Complete version
 exports.clockIn = async (req, res) => {
     try {
         const { employee_id, latitude, longitude, accuracy } = req.body;
@@ -407,6 +407,33 @@ exports.clockIn = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Employee not found' });
         }
         const emp = employees[0];
+
+        // ✅ NEW: Check for any incomplete attendance record from previous day(s)
+        const todayIST = nowIST().split(' ')[0];
+        const { data: incompleteRecords } = await supabase
+            .from('attendance')
+            .select('*')
+            .eq('employee_id', employee_id)
+            .not('clock_in', 'is', null)
+            .is('clock_out', null)
+            .lt('attendance_date', todayIST)
+            .order('attendance_date', { ascending: false });
+
+        if (incompleteRecords && incompleteRecords.length > 0) {
+            const incompleteRecord = incompleteRecords[0];
+            const incompleteDate = incompleteRecord.attendance_date;
+
+            console.log(`⚠️ Found incomplete attendance for ${incompleteDate}. Please clock out first.`);
+
+            return res.status(400).json({
+                success: false,
+                message: `You have an incomplete attendance record from ${incompleteDate}. Please clock out for that day first before clocking in for today.`,
+                has_missed_clockout: true,
+                attendance_id: incompleteRecord.id,
+                attendance_date: incompleteDate,
+                clock_in_time: incompleteRecord.clock_in_ist || incompleteRecord.clock_in
+            });
+        }
 
         // Check for existing active session
         const { data: activeSessions } = await supabase
@@ -664,8 +691,6 @@ exports.clockIn = async (req, res) => {
         res.status(500).json({ success: false, message: 'Failed to clock in', error: error.message });
     }
 };
-
-// Clock Out function
 exports.clockOut = async (req, res) => {
     try {
         console.log('📍 CLOCK-OUT REQUEST START');
@@ -761,7 +786,7 @@ exports.clockOut = async (req, res) => {
         console.log(`✅ Query time: ${queryTime}ms`);
 
         // Use IST strings for accurate diff (avoids UTC offset issues)
-        const clockInIST = attendanceRecord.clock_in_ist || nowIST(); // fallback
+        const clockInIST = attendanceRecord.clock_in_ist || nowIST();
         const clockOutIST = nowIST();
 
         const clockInMs = toUTCMs(clockInIST);
@@ -771,21 +796,34 @@ exports.clockOut = async (req, res) => {
         if (totalMinutes < 0) totalMinutes += 24 * 60;
         const totalHours = totalMinutes / 60;
 
+        // Get expected work hours from shift timing
         const shiftTiming = parseShiftTiming(employee?.shift_timing);
+        const expectedWorkHours = shiftTiming.totalHours || 9;
+        const expectedWorkMinutes = expectedWorkHours * 60;
 
-        let status = 'half_day';
-        if (totalMinutes >= 480) status = 'present';
-        else if (totalMinutes < 240) status = 'absent';
+        // ✅ UPDATED: Calculate status based on expected work hours
+        let status = 'half_day'; // Default to half_day
+        if (totalMinutes >= expectedWorkMinutes) {
+            status = 'present';  // Full day (expected work hours or more)
+        } else if (totalMinutes < 240) {
+            status = 'absent';   // Less than 4 hours
+        }
+        // Between 4 hours and expectedWorkMinutes = half_day
 
         const overtime = calculateOvertime(totalHours, shiftTiming.totalHours);
+
+        // Calculate display hours and minutes
+        const displayHours = Math.floor(totalMinutes / 60);
+        const displayMinutes = totalMinutes % 60;
+        const totalHoursDisplay = `${displayHours}h ${displayMinutes}m`;
 
         // Update attendance record
         const updateData = {
             clock_out: istStringToUTCISO(clockOutIST),
             clock_out_ist: clockOutIST,
-            total_hours: Math.round(totalHours * 100) / 100,
-            total_minutes: Math.round(totalMinutes),
-            total_hours_display: `${Math.floor(Math.abs(totalMinutes) / 60)}h ${Math.round(Math.abs(totalMinutes) % 60)}m`,
+            total_hours: parseFloat(totalHours.toFixed(2)),
+            total_minutes: totalMinutes,
+            total_hours_display: totalHoursDisplay,
             status: status
         };
 
@@ -795,7 +833,9 @@ exports.clockOut = async (req, res) => {
         updateData.overtime_amount = overtime.overtimeAmount;
         updateData.has_overtime = overtime.hasOvertime;
 
+        console.log(`⏱️ Total minutes: ${totalMinutes}, Expected: ${expectedWorkMinutes}, Status: ${status}`);
         console.log('⏱️ Updating attendance record...');
+
         const { error: updateError } = await supabase
             .from('attendance')
             .update(updateData)
@@ -830,9 +870,9 @@ exports.clockOut = async (req, res) => {
             success: true,
             message: '✅ Clocked out successfully',
             clock_out_ist: clockOutIST,
-            total_hours: Math.round(totalHours * 100) / 100,
-            total_minutes: Math.round(totalMinutes),
-            total_hours_display: `${Math.floor(Math.abs(totalMinutes) / 60)}h ${Math.round(Math.abs(totalMinutes) % 60)}m`,
+            total_hours: parseFloat(totalHours.toFixed(2)),
+            total_minutes: totalMinutes,
+            total_hours_display: totalHoursDisplay,
             status: status,
             response_time_ms: totalTime
         });
@@ -844,6 +884,97 @@ exports.clockOut = async (req, res) => {
             message: 'Failed to clock out',
             error: error.message,
             error_type: 'SERVER_ERROR'
+        });
+    }
+};
+// Clock Out for Missed/Previous Day Attendance
+exports.clockOutMissed = async (req, res) => {
+    try {
+        const { employee_id, attendance_id, attendance_date } = req.body;
+        
+        if (!employee_id || !attendance_id) {
+            return res.status(400).json({ success: false, message: 'Employee ID and Attendance ID are required' });
+        }
+
+        // Get the attendance record
+        const { data: attendance, error: fetchError } = await supabase
+            .from('attendance')
+            .select('*')
+            .eq('id', attendance_id)
+            .eq('employee_id', employee_id)
+            .maybeSingle();
+
+        if (fetchError || !attendance) {
+            return res.status(404).json({ success: false, message: 'Attendance record not found' });
+        }
+
+        if (attendance.clock_out) {
+            return res.status(400).json({ success: false, message: 'This attendance record already has a clock-out time' });
+        }
+
+        // Set clock out to 9:00 PM (21:00) IST for that day
+        const clockOutIST = `${attendance.attendance_date} 21:00:00`;
+        
+        // Parse times
+        const clockInDate = new Date(attendance.clock_in_ist || attendance.clock_in);
+        const clockOutDate = new Date(clockOutIST);
+        
+        let totalMinutes = Math.round((clockOutDate - clockInDate) / (1000 * 60));
+        if (totalMinutes < 0) totalMinutes += 24 * 60;
+        const totalHours = totalMinutes / 60;
+        
+        const displayHours = Math.floor(totalMinutes / 60);
+        const displayMinutes = totalMinutes % 60;
+        const totalHoursDisplay = `${displayHours}h ${displayMinutes}m`;
+        
+        // Determine status
+        const shiftTiming = parseShiftTiming(attendance.shift_time_used);
+        const expectedWorkMinutes = (shiftTiming.totalHours || 9) * 60;
+        
+        let status = 'half_day';
+        if (totalMinutes >= expectedWorkMinutes) {
+            status = 'present';
+        } else if (totalMinutes < 240) {
+            status = 'absent';
+        }
+        
+        // Update attendance
+        const { error: updateError } = await supabase
+            .from('attendance')
+            .update({
+                clock_out: istStringToUTCISO(clockOutIST),
+                clock_out_ist: clockOutIST,
+                total_hours: parseFloat(totalHours.toFixed(2)),
+                total_minutes: totalMinutes,
+                total_hours_display: totalHoursDisplay,
+                status: status
+            })
+            .eq('id', attendance.id);
+            
+        if (updateError) {
+            console.error('Error updating attendance:', updateError);
+            throw updateError;
+        }
+        
+        res.json({
+            success: true,
+            message: `Clocked out successfully for ${attendance.attendance_date}`,
+            data: {
+                attendance_date: attendance.attendance_date,
+                clock_out_ist: clockOutIST,
+                total_hours: totalHours.toFixed(2),
+                total_minutes: totalMinutes,
+                total_hours_display: totalHoursDisplay,
+                status: status
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error in clockOutMissed:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to clock out for missed day',
+            error: error.message
         });
     }
 };
@@ -2328,6 +2459,380 @@ exports.markAbsentEmployeesAsLeave = async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Failed to process absent employees',
+            error: error.message
+        });
+    }
+};
+
+// Add this function to your attendanceController.js file (before module.exports = exports;)
+
+// Get team attendance report for reporting manager
+exports.getTeamAttendanceReport = async (req, res) => {
+    try {
+        const { start, end, employee_id, view_type } = req.query;
+        const managerEmployeeId = req.user?.employeeId;
+        const userRole = req.user?.role;
+
+        console.log('📊 Fetching team attendance report for manager:', managerEmployeeId);
+        console.log('Query params:', { start, end, employee_id, view_type });
+
+        // Get manager details
+        const manager = await getEmployeeById(managerEmployeeId);
+        if (!manager) {
+            return res.status(404).json({ success: false, message: 'Manager not found' });
+        }
+
+        const managerName = `${manager.first_name || ''} ${manager.last_name || ''}`.trim().toLowerCase();
+
+        // Get all team members (employees reporting to this manager)
+        const teamEmployeeIds = await getTeamEmployeeIdsByManagerName(managerName);
+
+        if (teamEmployeeIds.length === 0) {
+            return res.json({
+                success: true,
+                team_members: [],
+                attendance: [],
+                daily_stats: {},
+                employee_summary: [],
+                summary: {
+                    total_team_members: 0,
+                    total_present_today: 0,
+                    total_absent_today: 0,
+                    total_on_leave_today: 0,
+                    total_half_day_today: 0,
+                    total_late_today: 0,
+                    total_working_today: 0,
+                    team_attendance_rate: 0
+                },
+                message: 'No team members found'
+            });
+        }
+
+        // Get team member details
+        const { data: teamMembers, error: teamError } = await supabase
+            .from('employees')
+            .select('employee_id, first_name, last_name, department, designation, joining_date, shift_timing')
+            .in('employee_id', teamEmployeeIds);
+
+        if (teamError) throw teamError;
+
+        // If specific employee requested, filter
+        let targetEmployees = teamMembers;
+        if (employee_id && teamEmployeeIds.includes(employee_id)) {
+            targetEmployees = teamMembers.filter(emp => emp.employee_id === employee_id);
+        }
+
+        // Set date range
+        let startDate, endDate;
+        const today = new Date();
+        const todayStr = today.toISOString().split('T')[0];
+
+        if (view_type === 'daily' && start) {
+            startDate = start;
+            endDate = start;
+        } else if (view_type === 'monthly') {
+            // Get salary cycle dates (26th to 25th)
+            if (start && end) {
+                startDate = start;
+                endDate = end;
+            } else {
+                // Default to current salary cycle
+                const currentDate = new Date();
+                if (currentDate.getDate() >= 26) {
+                    startDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), 26).toISOString().split('T')[0];
+                    endDate = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 25).toISOString().split('T')[0];
+                } else {
+                    startDate = new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 26).toISOString().split('T')[0];
+                    endDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), 25).toISOString().split('T')[0];
+                }
+            }
+        } else {
+            // Default to current month
+            startDate = new Date(today.getFullYear(), today.getMonth(), 1).toISOString().split('T')[0];
+            endDate = todayStr;
+        }
+
+        console.log(`📅 Date range: ${startDate} to ${endDate}`);
+
+        // Fetch attendance for all team members
+        const { data: attendanceData, error: attendanceError } = await supabase
+            .from('attendance')
+            .select('*, employees!inner(first_name, last_name, department, shift_timing)')
+            .in('employee_id', targetEmployees.map(emp => emp.employee_id))
+            .gte('attendance_date', startDate)
+            .lte('attendance_date', endDate)
+            .order('attendance_date', { ascending: true });
+
+        if (attendanceError) throw attendanceError;
+
+        // Fetch leave data for the same period
+        const { data: leaveData, error: leaveError } = await supabase
+            .from('leaves')
+            .select('*')
+            .in('employee_id', targetEmployees.map(emp => emp.employee_id))
+            .eq('status', 'approved')
+            .gte('start_date', startDate)
+            .lte('end_date', endDate);
+
+        if (leaveError) console.error('Error fetching leaves:', leaveError);
+
+        // Create leave map for quick lookup
+        const leaveMap = {};
+        (leaveData || []).forEach(leave => {
+            const leaveStart = new Date(leave.start_date);
+            const leaveEnd = new Date(leave.end_date);
+
+            for (let d = new Date(leaveStart); d <= leaveEnd; d.setDate(d.getDate() + 1)) {
+                const dateStr = d.toISOString().split('T')[0];
+                const key = `${leave.employee_id}-${dateStr}`;
+                leaveMap[key] = {
+                    type: leave.leave_type,
+                    reason: leave.reason
+                };
+            }
+        });
+
+        // Process attendance data
+        const formattedAttendance = [];
+        const dailyStats = {};
+        const employeeStats = {};
+
+        // Initialize employee stats
+        targetEmployees.forEach(emp => {
+            employeeStats[emp.employee_id] = {
+                employee_id: emp.employee_id,
+                name: `${emp.first_name} ${emp.last_name}`,
+                department: emp.department,
+                total_present: 0,
+                total_half_day: 0,
+                total_absent: 0,
+                total_on_leave: 0,
+                total_late: 0,
+                total_late_minutes: 0,
+                total_overtime_hours: 0,
+                total_working_hours: 0,
+                working_days_count: 0,
+                attendance_rate: 0
+            };
+        });
+
+        // Get all dates in range
+        const dateRange = [];
+        let currentDate = new Date(startDate);
+        const endDateTime = new Date(endDate);
+
+        while (currentDate <= endDateTime) {
+            const dateStr = currentDate.toISOString().split('T')[0];
+            const dayOfWeek = currentDate.getDay();
+            const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+            dateRange.push({ date: dateStr, isWeekend });
+            currentDate.setDate(currentDate.getDate() + 1);
+        }
+
+        // Build attendance map
+        const attendanceMap = {};
+        (attendanceData || []).forEach(record => {
+            const key = `${record.employee_id}-${record.attendance_date}`;
+            attendanceMap[key] = record;
+        });
+
+        // In getTeamAttendanceReport function - Update the status determination section
+        for (const emp of targetEmployees) {
+            for (const { date, isWeekend } of dateRange) {
+                const attendanceKey = `${emp.employee_id}-${date}`;
+                const attendance = attendanceMap[attendanceKey];
+                const leave = leaveMap[attendanceKey];
+
+                let status = 'absent';
+                let clockIn = null;
+                let clockOut = null;
+                let totalHours = 0;
+                let lateMinutes = 0;
+                let isLate = false;
+                let overtimeHours = 0;
+                let statusDisplay = 'A';
+                let statusColor = 'danger';
+
+                if (isWeekend) {
+                    status = 'weekend';
+                    statusDisplay = 'W';
+                    statusColor = 'secondary';
+                } else if (leave) {
+                    status = 'on_leave';
+                    statusDisplay = 'L';
+                    statusColor = 'purple';
+                } else if (attendance) {
+                    clockIn = attendance.clock_in_ist || attendance.clock_in;
+                    clockOut = attendance.clock_out_ist || attendance.clock_out;
+                    totalHours = parseFloat(attendance.total_hours) || 0;
+                    lateMinutes = parseFloat(attendance.late_minutes) || 0;
+                    isLate = lateMinutes > 0;
+                    overtimeHours = attendance.overtime_hours || 0;
+
+                    // Calculate total minutes worked
+                    let totalMinutes = 0;
+                    if (clockIn && clockOut) {
+                        const clockInDate = new Date(clockIn);
+                        const clockOutDate = new Date(clockOut);
+                        totalMinutes = Math.round((clockOutDate - clockInDate) / (1000 * 60));
+                        if (totalMinutes < 0) totalMinutes += 24 * 60;
+                        totalHours = totalMinutes / 60;
+                    }
+
+                    // Get expected work hours from employee's shift timing
+                    const shiftTiming = parseShiftTiming(emp.shift_timing);
+                    const expectedWorkHours = shiftTiming.totalHours || 9;
+                    const expectedWorkMinutes = expectedWorkHours * 60;
+
+                    // ✅ UPDATED: Determine status based on actual working minutes vs expected
+                    if (clockIn && clockOut && totalMinutes >= expectedWorkMinutes) {
+                        status = 'present';
+                        statusDisplay = 'P';
+                        statusColor = isLate ? 'warning' : 'success';
+                        employeeStats[emp.employee_id].total_present++;
+                        employeeStats[emp.employee_id].working_days_count++;
+                        employeeStats[emp.employee_id].total_working_hours += totalHours;
+                    }
+                    else if (clockIn && clockOut && totalMinutes >= 240 && totalMinutes < expectedWorkMinutes) {
+                        status = 'half_day';
+                        statusDisplay = 'HD';
+                        statusColor = 'warning';
+                        employeeStats[emp.employee_id].total_half_day++;
+                        employeeStats[emp.employee_id].working_days_count++;
+                        employeeStats[emp.employee_id].total_working_hours += totalHours;
+                    }
+                    else if (clockIn && !clockOut) {
+                        status = 'working';
+                        statusDisplay = 'W';
+                        statusColor = 'info';
+                        employeeStats[emp.employee_id].working_days_count++;
+                        employeeStats[emp.employee_id].total_working_hours += totalHours;
+                    }
+                    else {
+                        employeeStats[emp.employee_id].total_absent++;
+                    }
+
+                    if (isLate) {
+                        employeeStats[emp.employee_id].total_late++;
+                        employeeStats[emp.employee_id].total_late_minutes += lateMinutes;
+                    }
+
+                    if (overtimeHours > 0) {
+                        employeeStats[emp.employee_id].total_overtime_hours += overtimeHours;
+                    }
+                } else {
+                    employeeStats[emp.employee_id].total_absent++;
+                }
+
+                // Rest of the code remains the same...
+                // Daily stats for today
+                if (date === todayStr) {
+                    if (!dailyStats[date]) {
+                        dailyStats[date] = {
+                            total_employees: targetEmployees.length,
+                            present: 0,
+                            absent: 0,
+                            on_leave: 0,
+                            half_day: 0,
+                            working: 0,
+                            weekend: 0,
+                            late_count: 0,
+                            present_count: 0
+                        };
+                    }
+
+                    if (status === 'present') dailyStats[date].present_count++;
+                    if (status === 'present') dailyStats[date].present++;
+                    if (status === 'absent') dailyStats[date].absent++;
+                    if (status === 'on_leave') dailyStats[date].on_leave++;
+                    if (status === 'half_day') dailyStats[date].half_day++;
+                    if (status === 'working') dailyStats[date].working++;
+                    if (status === 'weekend') dailyStats[date].weekend++;
+                    if (isLate) dailyStats[date].late_count++;
+                }
+
+                formattedAttendance.push({
+                    id: attendance?.id || `${emp.employee_id}-${date}`,
+                    employee_id: emp.employee_id,
+                    employee_name: `${emp.first_name} ${emp.last_name}`,
+                    department: emp.department,
+                    attendance_date: date,
+                    clock_in: clockIn,
+                    clock_out: clockOut,
+                    total_hours: totalHours.toFixed(1),
+                    status: status,
+                    status_display: statusDisplay,
+                    status_color: statusColor,
+                    is_late: isLate,
+                    late_minutes: lateMinutes,
+                    late_display: lateMinutes > 0 ? formatLateTime(lateMinutes) : null,
+                    overtime_hours: overtimeHours,
+                    is_weekend: isWeekend,
+                    leave_type: leave?.type || null
+                });
+            }
+        }
+
+        // Calculate attendance rates and summary
+        const totalWorkingDays = dateRange.filter(d => !d.isWeekend).length;
+        const employeeSummary = Object.values(employeeStats).map(emp => {
+            const attendanceRate = totalWorkingDays > 0
+                ? ((emp.total_present + emp.total_half_day) / totalWorkingDays * 100).toFixed(1)
+                : 0;
+
+            return {
+                ...emp,
+                total_working_days: totalWorkingDays,
+                attendance_rate: attendanceRate,
+                avg_hours_per_day: emp.working_days_count > 0
+                    ? (emp.total_working_hours / emp.working_days_count).toFixed(1)
+                    : 0,
+                avg_late_minutes: emp.total_late_count > 0
+                    ? (emp.total_late_minutes / emp.total_late_count).toFixed(0)
+                    : 0
+            };
+        });
+
+        // Calculate team summary for today
+        const todayStats = dailyStats[todayStr] || {
+            total_employees: targetEmployees.length,
+            present: 0,
+            absent: 0,
+            on_leave: 0,
+            half_day: 0,
+            working: 0,
+            weekend: 0,
+            late_count: 0,
+            present_count: 0
+        };
+
+        res.json({
+            success: true,
+            team_members: targetEmployees,
+            attendance: formattedAttendance,
+            date_range: { start: startDate, end: endDate },
+            total_working_days: totalWorkingDays,
+            daily_stats: todayStats,
+            employee_summary: employeeSummary,
+            summary: {
+                total_team_members: targetEmployees.length,
+                total_present_today: todayStats.present_count,
+                total_absent_today: todayStats.absent,
+                total_on_leave_today: todayStats.on_leave,
+                total_half_day_today: todayStats.half_day,
+                total_late_today: todayStats.late_count,
+                total_working_today: todayStats.working,
+                team_attendance_rate: totalWorkingDays > 0
+                    ? (employeeSummary.reduce((sum, e) => sum + parseFloat(e.attendance_rate), 0) / employeeSummary.length).toFixed(1)
+                    : 0
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error in getTeamAttendanceReport:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch team attendance report',
             error: error.message
         });
     }

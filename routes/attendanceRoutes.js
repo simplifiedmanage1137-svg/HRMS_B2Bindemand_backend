@@ -10,6 +10,8 @@ module.exports = (supabase, authenticateToken, requireAdmin) => {
     router.post('/clock-out', attendanceController.clockOut);
     router.post('/heartbeat', attendanceController.heartbeat);
 
+    router.post('/clock-out-missed', authenticateToken, attendanceController.clockOutMissed);
+
     // Get today's attendance for an employee
     router.get('/today/:employee_id', attendanceController.getTodayAttendance);
 
@@ -22,6 +24,9 @@ module.exports = (supabase, authenticateToken, requireAdmin) => {
 
     // Admin-only attendance report (full access)
     router.get('/report', authenticateToken, requireAdmin, attendanceController.getAttendanceReport);
+
+    // ✅ NEW: Team attendance report for managers
+    router.get('/team-report', authenticateToken, attendanceController.getTeamAttendanceReport);
 
     // Regularization endpoints
     // Managers and admins can view and act on regularization requests according to team-level approval rules.
@@ -131,6 +136,6 @@ module.exports = (supabase, authenticateToken, requireAdmin) => {
         }
     });
 
-    console.log('✅ Attendance routes loaded with regularization support');
+    console.log('✅ Attendance routes loaded with regularization support and team report');
     return router;
 };
