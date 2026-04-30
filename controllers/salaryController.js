@@ -153,10 +153,26 @@ exports.generateSalarySlip = async (req, res) => {
             .gte('attendance_date', cycle.startDateStr)
             .lte('attendance_date', cycle.endDateStr);
 
-        // Count present days (has clock_in + clock_out)
-        const presentDays = (attendanceRecords || []).filter(a =>
-            a.clock_in && a.clock_out
-        ).length;
+        const expectedWorkMinutes = 9 * 60;
+        const halfDayThreshold = 300;
+        let presentDays = 0;
+        let halfDayDays = 0;
+        let absentDaysFromAttendance = 0;
+
+        for (const record of (attendanceRecords || [])) {
+            if (record.clock_in && record.clock_out) {
+                const totalMinutes = Number(record.total_minutes) || Math.round((new Date(record.clock_out) - new Date(record.clock_in)) / (1000 * 60));
+                if (totalMinutes >= expectedWorkMinutes) {
+                    presentDays++;
+                } else if (totalMinutes >= halfDayThreshold) {
+                    halfDayDays++;
+                } else {
+                    absentDaysFromAttendance++;
+                }
+            } else if (record.clock_in && !record.clock_out) {
+                absentDaysFromAttendance++;
+            }
+        }
 
         // ── Get approved leaves in cycle ──
         const { data: leaves } = await supabase
@@ -193,8 +209,17 @@ exports.generateSalarySlip = async (req, res) => {
             }
         }
 
-        // Absent days = working days - present - paid leave - unpaid leave
-        const absentDays = Math.max(0, totalWorkingDays - presentDays - paidLeaveDays - unpaidLeaveDays);
+        const monthlySalary = parseFloat(employee.gross_salary || employee.salary || 0);
+        const perDaySalary  = totalWorkingDays > 0 ? monthlySalary / totalWorkingDays : 0;
+
+        const countedAttendanceDays = presentDays + halfDayDays + absentDaysFromAttendance;
+        const absentDaysFromMissing = Math.max(0, totalWorkingDays - countedAttendanceDays - paidLeaveDays - unpaidLeaveDays);
+        const absentDays = absentDaysFromAttendance + absentDaysFromMissing;
+
+        const absentDeduction = parseFloat((absentDays * perDaySalary).toFixed(2));
+        const halfDayDeduction = parseFloat((halfDayDays * perDaySalary * 0.5).toFixed(2));
+        const unpaidLeaveDeduction = parseFloat((unpaidLeaveDays * perDaySalary).toFixed(2));
+        const totalDeduction = parseFloat((absentDeduction + halfDayDeduction + unpaidLeaveDeduction).toFixed(2));
 
         // ── Get OT for the cycle period ──
         const { data: otRecords } = await supabase
@@ -209,19 +234,14 @@ exports.generateSalarySlip = async (req, res) => {
         const overtimeAmt = parseFloat((overtimeHrs * 150).toFixed(2));
 
         // ── Salary calculation ──
-        const monthlySalary = parseFloat(employee.gross_salary || employee.salary || 0);
-        const perDaySalary  = totalWorkingDays > 0 ? monthlySalary / totalWorkingDays : 0;
-
-        // Deduct unpaid leave days only (paid leaves don't reduce salary)
-        const unpaidDeduction = parseFloat((unpaidLeaveDays * perDaySalary).toFixed(2));
-        const basicSalary     = parseFloat((monthlySalary - unpaidDeduction).toFixed(2));
+        const basicSalary     = parseFloat((monthlySalary - totalDeduction).toFixed(2));
         const dtDeduction     = 200;
         const netSalary       = parseFloat((basicSalary - dtDeduction + overtimeAmt).toFixed(2));
 
         console.log('📊 Salary Calculation:', {
             cycle: `${cycle.startDateStr} to ${cycle.endDateStr}`,
-            totalWorkingDays, presentDays, paidLeaveDays, unpaidLeaveDays, absentDays,
-            monthlySalary, perDaySalary, unpaidDeduction, basicSalary,
+            totalWorkingDays, presentDays, halfDayDays, paidLeaveDays, unpaidLeaveDays, absentDays,
+            monthlySalary, perDaySalary, totalDeduction, basicSalary,
             overtimeHrs, overtimeAmt, dtDeduction, netSalary
         });
 
@@ -237,7 +257,7 @@ exports.generateSalarySlip = async (req, res) => {
                 unpaid_leave_days:  unpaidLeaveDays,
                 absent_days:        absentDays,
                 per_day_salary:     parseFloat(perDaySalary.toFixed(2)),
-                unpaid_deduction:   unpaidDeduction,
+                unpaid_deduction:   totalDeduction,
                 monthly_salary:     monthlySalary,
                 basic_salary:       basicSalary,
                 dt:                 dtDeduction,

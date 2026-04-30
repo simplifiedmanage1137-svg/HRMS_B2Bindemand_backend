@@ -360,9 +360,10 @@ exports.autoCloseStaleSessions = async () => {
                 }
                 const totalMinutes = calculateTimeDifferenceInMinutes(clockInTime, autoClockOutTime);
                 const totalHours = totalMinutes / 60;
+                const expectedWorkMinutes = (shiftTiming.totalHours || 9) * 60;
                 let status = 'half_day';
-                if (totalMinutes >= 480) status = 'present';
-                else if (totalMinutes < 240) status = 'absent';
+                if (totalMinutes >= expectedWorkMinutes) status = 'present';
+                else if (totalMinutes < 300) status = 'absent';
 
                 const clockOutIST = autoClockOutTime.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', hour12: false });
 
@@ -805,10 +806,10 @@ exports.clockOut = async (req, res) => {
         let status = 'half_day'; // Default to half_day
         if (totalMinutes >= expectedWorkMinutes) {
             status = 'present';  // Full day (expected work hours or more)
-        } else if (totalMinutes < 240) {
-            status = 'absent';   // Less than 4 hours
+        } else if (totalMinutes < 300) {
+            status = 'absent';   // Less than 5 hours
         }
-        // Between 4 hours and expectedWorkMinutes = half_day
+        // Between 5 hours and expectedWorkMinutes = half_day
 
         const overtime = calculateOvertime(totalHours, shiftTiming.totalHours);
 
@@ -943,7 +944,7 @@ exports.clockOutMissed = async (req, res) => {
         let status = 'half_day';
         if (totalMinutes >= expectedWorkMinutes) {
             status = 'present';
-        } else if (totalMinutes < 240) {
+        } else if (totalMinutes < 300) {
             status = 'absent';
         }
 
@@ -1735,7 +1736,7 @@ exports.approveRegularization = async (req, res) => {
                     total_hours: parseFloat(totalHours.toFixed(2)),
                     total_minutes: totalMinutes,
                     total_hours_display: `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`,
-                    status: totalMinutes >= 480 ? 'present' : totalMinutes >= 240 ? 'half_day' : 'absent',
+                    status: totalMinutes >= 540 ? 'present' : totalMinutes >= 300 ? 'half_day' : 'absent',
                     is_regularized: true,
                     regularization_approved: true,
                     regularization_approved_at: new Date().toISOString(),
@@ -2702,7 +2703,7 @@ exports.getTeamAttendanceReport = async (req, res) => {
                         employeeStats[emp.employee_id].working_days_count++;
                         employeeStats[emp.employee_id].total_working_hours += totalHours;
                     }
-                    else if (clockIn && clockOut && totalMinutes >= 240 && totalMinutes < expectedWorkMinutes) {
+                    else if (clockIn && clockOut && totalMinutes >= 300 && totalMinutes < expectedWorkMinutes) {
                         status = 'half_day';
                         statusDisplay = 'HD';
                         statusColor = 'warning';
