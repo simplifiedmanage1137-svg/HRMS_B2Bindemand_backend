@@ -1,4 +1,4 @@
-// server.js - FIXED CORS CONFIGURATION
+// server.js - CORRECTED VERSION
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
@@ -27,6 +27,7 @@ const employeeUpdateRoutes = require('./routes/employeeUpdateRoutes');
 const updateResponseRoutes = require('./routes/updateResponseRoutes');
 const noticeRoutes = require('./routes/noticeRoutes');
 const announcementRoutes = require('./routes/announcementRoutes');
+const ratingRoutes = require('./routes/ratingRoutes');
 
 // Import attendance controller for cron jobs
 const attendanceController = require('./controllers/attendanceController');
@@ -52,7 +53,6 @@ const allowedOriginsFromEnv = process.env.ALLOWED_ORIGINS
     ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
     : [];
 
-// Define allowed origins (including your Vercel frontend)
 const allowedOrigins = [
     'http://localhost:5173',
     'http://localhost:5174',
@@ -62,12 +62,11 @@ const allowedOrigins = [
     'http://127.0.0.1:5174',
     'http://127.0.0.1:3000',
     'http://127.0.0.1:3001',
-    'https://hrms-b2-bindemand-a31u.vercel.app', // Your Vercel frontend
-    'https://hrms-b2bindemand-backend.onrender.com', // Your backend URL
+    'https://hrms-b2-bindemand-a31u.vercel.app',
+    'https://hrms-b2bindemand-backend.onrender.com',
     ...allowedOriginsFromEnv
 ];
 
-// Remove duplicates
 const uniqueAllowedOrigins = [...new Set(allowedOrigins)];
 
 console.log('🔧 CORS Allowed Origins:');
@@ -77,24 +76,16 @@ uniqueAllowedOrigins.forEach(origin => {
 
 app.use(cors({
     origin: function(origin, callback) {
-        // Allow requests with no origin (mobile apps, curl, Postman, same-origin)
         if (!origin) return callback(null, true);
-
-        // Allow all localhost/127.0.0.1 ports (any machine running locally)
         if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
             return callback(null, true);
         }
-
-        // Allow local network IPs (192.168.x.x, 10.x.x.x) for LAN access
         if (/^https?:\/\/(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(origin)) {
             return callback(null, true);
         }
-
-        // Allow explicitly listed origins from env
         if (uniqueAllowedOrigins.includes(origin)) {
             return callback(null, true);
         }
-
         console.log(`❌ CORS blocked: ${origin}`);
         return callback(new Error(`Not allowed by CORS: ${origin}`));
     },
@@ -106,8 +97,6 @@ app.use(cors({
     ],
     maxAge: 86400
 }));
-
-
 
 // Simple CORS logging middleware
 app.use((req, res, next) => {
@@ -223,7 +212,10 @@ app.use('/api/auth', authRoutes);
 // Protected routes (authentication required)
 app.use('/api/employees', authenticateToken, employeeRoutes);
 app.use('/api/leaves', authenticateToken, leaveRoutes);
+
+// ✅ FIX: attendanceRoutes needs to be called as a function with parameters
 app.use('/api/attendance', authenticateToken, attendanceRoutes(supabase, authenticateToken, requireAdmin));
+
 app.use('/api/salary', authenticateToken, salaryRoutes);
 app.use('/api/notifications', authenticateToken, notificationRoutes);
 app.use('/api/admin-updates', authenticateToken, adminUpdateRoutes);
@@ -231,6 +223,10 @@ app.use('/api/employee-updates', authenticateToken, employeeUpdateRoutes);
 app.use('/api/update-responses', authenticateToken, updateResponseRoutes);
 app.use('/api/notices', authenticateToken, noticeRoutes);
 app.use('/api/announcements', authenticateToken, announcementRoutes);
+
+// ✅ FIX: ratingRoutes also needs to be called as a function
+const ratingsRouter = ratingRoutes(authenticateToken, requireAdmin);
+app.use('/api/ratings', ratingsRouter);
 
 // Make uploadDocuments available to routes
 app.locals.uploadDocuments = uploadDocuments;
@@ -248,7 +244,8 @@ app.get('/api/health', (req, res) => {
         features: {
             attendance_regularization: true,
             auto_close_sessions: true,
-            cron_jobs_enabled: true
+            cron_jobs_enabled: true,
+            employee_ratings: true
         }
     });
 });
@@ -318,7 +315,8 @@ app.get('/', (req, res) => {
             attendance_regularization: true,
             auto_close_missed_clockouts: true,
             overtime_calculation: true,
-            comp_off_management: true
+            comp_off_management: true,
+            employee_ratings: true
         },
         endpoints: {
             health: '/api/health',
@@ -333,7 +331,8 @@ app.get('/', (req, res) => {
             notifications: '/api/notifications/*',
             adminUpdates: '/api/admin-updates/*',
             employeeUpdates: '/api/employee-updates/*',
-            updateResponses: '/api/update-responses/*'
+            updateResponses: '/api/update-responses/*',
+            ratings: '/api/ratings/*'
         }
     });
 });
@@ -460,7 +459,8 @@ app.use((req, res) => {
             '/api/notifications/*',
             '/api/admin-updates/*',
             '/api/employee-updates/*',
-            '/api/update-responses/*'
+            '/api/update-responses/*',
+            '/api/ratings/*'
         ]
     });
 });
@@ -538,6 +538,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`   - Auto-close Missed Clock-outs`);
     console.log(`   - Overtime Calculation`);
     console.log(`   - Comp-off Management`);
+    console.log(`   - Employee Ratings`);
     console.log(`   - Cron Jobs (Hourly/Daily/Weekly)`);
     console.log('='.repeat(70));
 });
@@ -645,7 +646,7 @@ app.get('/api/debug/routes', (req, res) => {
     printRoutes(app._router.stack);
     res.json({
         success: true,
-        routes: routes.filter(r => r.path.includes('regularization'))
+        routes: routes.filter(r => r.path.includes('regularization') || r.path.includes('ratings'))
     });
 });
 
