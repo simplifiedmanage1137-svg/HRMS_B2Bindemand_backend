@@ -90,15 +90,26 @@ const normalizeName = (value) => {
 
 const getEmployeeById = async (employeeId) => {
     if (!employeeId) return null;
-    const { data, error } = await supabase
+
+    // Try both string and numeric lookup
+    let query = supabase
         .from('employees')
-        .select('employee_id, first_name, last_name, reporting_manager')
-        .eq('employee_id', employeeId)
-        .maybeSingle();
+        .select('id, employee_id, first_name, last_name, reporting_manager, designation');
+
+    // If employeeId is a number or numeric string, try that first
+    if (!isNaN(employeeId)) {
+        const { data, error } = await query.eq('id', parseInt(employeeId)).maybeSingle();
+        if (!error && data) return data;
+    }
+
+    // Try by string employee_id
+    const { data, error } = await query.eq('employee_id', String(employeeId)).maybeSingle();
+
     if (error) {
         console.error(`❌ Error fetching employee ${employeeId}:`, error);
         return null;
     }
+
     return data;
 };
 
@@ -132,6 +143,8 @@ const employeeHasDirectReports = async (employeeName) => {
 
 // In your attendanceController.js - Update the canUserActOnRegularization function
 
+// In attendanceController.js - Update canUserActOnRegularization function
+
 const canUserActOnRegularization = async (userEmployeeId, userRole, requestEmployeeId) => {
     // If no user or request employee, deny access
     if (!userEmployeeId || !requestEmployeeId) return false;
@@ -140,28 +153,52 @@ const canUserActOnRegularization = async (userEmployeeId, userRole, requestEmplo
     const requestEmployee = await getEmployeeById(requestEmployeeId);
     if (!requestEmployee) return false;
 
-    // ADMIN ROLE: Can view but NOT act on regularization requests
-    if (userRole === 'admin') {
-        // Admin can see all requests but cannot approve/reject them
-        // Return false for acting (approve/reject), but we'll allow viewing separately
-        return false;
-    }
-
-    // EMPLOYEE/MANAGER ROLE: Check if user is the reporting manager
+    // Get approver details
     const approver = await getEmployeeById(userEmployeeId);
     if (!approver) return false;
 
     const approverName = `${approver.first_name || ''} ${approver.last_name || ''}`.trim().toLowerCase();
-    const requestEmployeeReportingManager = (requestEmployee.reporting_manager || '').trim().toLowerCase();
+    const requestEmployeeName = `${requestEmployee.first_name || ''} ${requestEmployee.last_name || ''}`.trim().toLowerCase();
 
-    // Check if user is the reporting manager of the request employee
-    if (requestEmployeeReportingManager && approverName === requestEmployeeReportingManager) {
+    // Check if the approver is the request employee themselves (can't approve own request)
+    if (approverName === requestEmployeeName) {
+        return false;
+    }
+
+    // Check if request employee is a Team Leader/Manager
+    const requestEmployeeDesignation = requestEmployee.designation || '';
+    const isRequestEmployeeManager = isTeamLeaderDesignation(requestEmployeeDesignation);
+
+    // ADMIN ROLE: Can approve/reject requests from Team Leaders/Managers
+    if (userRole === 'admin') {
+        // Admin can approve/reject requests from Team Leaders/Managers
+        if (isRequestEmployeeManager) {
+            return true;
+        }
+        // Admin cannot approve/reject regular employee requests
+        return false;
+    }
+
+    // For non-admin users (team leaders/managers)
+    // Team leader/manager can approve/reject requests from their team members
+    const requestEmployeeReportingManager = (requestEmployee.reporting_manager || '').trim().toLowerCase();
+    const isReportingManager = requestEmployeeReportingManager && approverName === requestEmployeeReportingManager;
+
+    // Also check if the approver is the direct reporting manager
+    if (isReportingManager) {
         return true;
     }
 
-    // Check if user is HR/Admin (for view only) - but not for acting
-    // For acting, only reporting manager can approve/reject
     return false;
+};
+
+// Helper function to check if employee is Team Leader/Manager
+const isTeamLeaderDesignation = (designation) => {
+    if (!designation) return false;
+    const d = designation.toLowerCase();
+    return d.includes('team leader') || d.includes('team manager') ||
+        d.includes('tl') || d.includes('lead') || d.includes('manager') ||
+        d.includes('head') || d.includes('supervisor');
 };
 
 // Helper function to check if user can view a regularization request
@@ -1513,15 +1550,40 @@ exports.requestRegularization = async (req, res) => {
 
         console.log('📝 Storing requested time (IST):', requestedTimeIST);
 
-        // CRITICAL: Ensure attendance_id is a number
-        let numericAttendanceId = attendance_id;
-        if (typeof attendance_id === 'string' && !isNaN(Number(attendance_id))) {
-            numericAttendanceId = Number(attendance_id);
+        // CRITICAL FIX: Get the numeric ID from the employees table
+        const { data: employeeRecord, error: employeeError } = await supabase
+            .from('employees')
+            .select('id')
+            .eq('employee_id', employee_id)
+            .maybeSingle();
+
+        if (employeeError || !employeeRecord) {
+            console.error('❌ Error finding employee record:', employeeError);
+            return res.status(404).json({
+                success: false,
+                message: 'Employee record not found'
+            });
         }
 
+        const numericEmployeeId = employeeRecord.id;
+        const numericAttendanceId = parseInt(attendance_id);
+        if (isNaN(numericAttendanceId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid attendance ID'
+            });
+        }
+
+        console.log('🔄 Converted IDs:', {
+            stringEmployeeId: employee_id,
+            numericEmployeeId: numericEmployeeId,
+            attendanceId: attendance_id,
+            numericAttendanceId: numericAttendanceId
+        });
+
         const regularizationData = {
-            employee_id: employee_id,
-            attendance_id: numericAttendanceId,  // Store as number, not string
+            employee_id: employee_id,  // Use numeric ID from employees table
+            attendance_id: numericAttendanceId,
             attendance_date: attendance_date || attendance.attendance_date,
             clock_in_time: attendance.clock_in_ist || attendance.clock_in,
             requested_clock_out_time: requestedTimeIST,
@@ -1592,14 +1654,6 @@ exports.approveRegularization = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Approved clock out time is required' });
         }
 
-        // ADMIN CANNOT APPROVE
-        if (userRole === 'admin') {
-            return res.status(403).json({
-                success: false,
-                message: '❌ Admin cannot approve regularization requests. Only reporting managers can approve/reject requests from their team members.'
-            });
-        }
-
         // Get the regularization request
         const { data: request, error: fetchError } = await supabase
             .from('regularization_requests')
@@ -1615,163 +1669,146 @@ exports.approveRegularization = async (req, res) => {
             return res.status(400).json({ success: false, message: `Request already ${request.status}` });
         }
 
-        // Check if user is the reporting manager
-        const requestEmployee = await getEmployeeById(request.employee_id);
-        const approver = await getEmployeeById(approver_id);
+        // Get request employee details
+        const { data: requestEmployee, error: requestEmployeeError } = await supabase
+            .from('employees')
+            .select('designation, reporting_manager')
+            .eq('employee_id', request.employee_id)
+            .maybeSingle();
 
-        if (!requestEmployee || !approver) {
-            return res.status(404).json({ success: false, message: 'User details not found' });
+        if (requestEmployeeError || !requestEmployee) {
+            return res.status(404).json({ success: false, message: 'Employee details not found' });
         }
 
-        const requestEmployeeReportingManager = (requestEmployee.reporting_manager || '').trim().toLowerCase();
-        const approverName = `${approver.first_name || ''} ${approver.last_name || ''}`.trim().toLowerCase();
+        const requestEmployeeDesignation = requestEmployee?.designation || '';
+        const isRequestEmployeeManager = isTeamLeaderDesignation(requestEmployeeDesignation);
 
-        if (requestEmployeeReportingManager !== approverName) {
+        // Check authorization
+        let isAuthorized = false;
+
+        if (userRole === 'admin') {
+            isAuthorized = true;
+            console.log('✅ Admin authorized to approve regularization request');
+        } else {
+            const approver = await getEmployeeById(approver_id);
+            if (!approver) {
+                return res.status(404).json({ success: false, message: 'Approver not found' });
+            }
+
+            const approverName = `${approver.first_name || ''} ${approver.last_name || ''}`.trim().toLowerCase();
+            const requestEmployeeReportingManager = (requestEmployee?.reporting_manager || '').trim().toLowerCase();
+
+            if (requestEmployeeReportingManager === approverName) {
+                isAuthorized = true;
+                console.log('✅ Reporting manager authorized to approve request');
+            }
+        }
+
+        if (!isAuthorized) {
             return res.status(403).json({
                 success: false,
-                message: '❌ Only the reporting manager can approve regularization requests for their team members.'
+                message: '❌ You are not authorized to approve this regularization request.'
             });
         }
 
-        // Parse times
-        let clockOutIST;
-        let clockInDate;
-        let clockOutDate;
-        let totalMinutes, totalHours;
-
-        const timeStr = String(approved_clock_out_time).trim();
-
-        try {
-            // Parse clock out time
-            if (timeStr.includes('T')) {
-                clockOutIST = timeStr.replace('T', ' ') + (timeStr.length === 16 ? ':00' : '');
-            } else if (timeStr.includes(' ')) {
-                clockOutIST = timeStr.length === 16 ? timeStr + ':00' : timeStr;
-            } else {
-                const d = new Date(timeStr);
-                const ist = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
-                clockOutIST = ist.toISOString().replace('T', ' ').substring(0, 19);
-            }
-
-            // Parse clock in time
-            const clockInIST = request.clock_in_time;
-            const [inDp, inTp] = clockInIST.split(' ');
-            const [inY, inMo, inD] = inDp.split('-').map(Number);
-            const [inH, inMi, inS] = inTp.split(':').map(Number);
-            clockInDate = new Date(inY, inMo - 1, inD, inH, inMi, inS || 0);
-
-            // Parse clock out time
-            const [outDp, outTp] = clockOutIST.split(' ');
-            const [outY, outMo, outD] = outDp.split('-').map(Number);
-            const [outH, outMi, outS] = outTp.split(':').map(Number);
-            clockOutDate = new Date(outY, outMo - 1, outD, outH, outMi, outS || 0);
-
-            // Calculate duration
-            totalMinutes = Math.round((clockOutDate - clockInDate) / (1000 * 60));
-            if (totalMinutes < 0) totalMinutes += 24 * 60;
-            totalHours = totalMinutes / 60;
-
-        } catch (timeError) {
-            console.error('❌ Time parsing error:', timeError);
-            throw timeError;
+        // Parse the approved clock out time
+        let clockOutIST = approved_clock_out_time;
+        if (clockOutIST.includes('T')) {
+            clockOutIST = clockOutIST.replace('T', ' ');
+        }
+        if (!clockOutIST.match(/\d{2}:\d{2}:\d{2}$/)) {
+            clockOutIST = clockOutIST + ':00';
         }
 
-        // Find the correct attendance record
-        let attendanceRecord = null;
+        console.log('⏰ Approved clock out time (IST):', clockOutIST);
 
-        // Method 1: Try by attendance_id if it's a valid number
-        const attendanceIdRaw = request.attendance_id;
-        console.log('📊 Original attendance_id:', attendanceIdRaw, 'Type:', typeof attendanceIdRaw);
+        // Calculate total hours
+        const clockInTime = request.clock_in_time;
 
-        if (attendanceIdRaw && !isNaN(Number(attendanceIdRaw)) && String(attendanceIdRaw) !== 'NaN') {
-            const numericId = Number(attendanceIdRaw);
-            console.log('🔢 Trying numeric attendance ID:', numericId);
-            const { data: attRecord } = await supabase
-                .from('attendance')
-                .select('*')
-                .eq('id', numericId)
-                .maybeSingle();
+        const clockInMs = toUTCMs(clockInTime);
+        const clockOutMs = toUTCMs(clockOutIST);
+        let totalMinutes = Math.round((clockOutMs - clockInMs) / (1000 * 60));
+        if (totalMinutes < 0) totalMinutes += 24 * 60;
+        const totalHours = totalMinutes / 60;
+        const totalHoursDisplay = `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`;
 
-            if (attRecord) {
-                attendanceRecord = attRecord;
-                console.log('✅ Found attendance by numeric ID:', attendanceRecord.id);
-            }
+        // Get expected work hours from shift timing
+        const { data: attendanceData } = await supabase
+            .from('attendance')
+            .select('shift_time_used')
+            .eq('id', request.attendance_id)
+            .maybeSingle();
+
+        const shiftTiming = parseShiftTiming(attendanceData?.shift_time_used);
+        const expectedWorkMinutes = (shiftTiming.totalHours || 9) * 60;
+
+        let status = 'half_day';
+        if (totalMinutes >= expectedWorkMinutes) {
+            status = 'present';
+        } else if (totalMinutes < 300) {
+            status = 'absent';
         }
 
-        // Method 2: Find by employee_id and attendance_date
-        if (!attendanceRecord) {
-            console.log('🔍 Searching by employee_id and date:', request.employee_id, request.attendance_date);
-            const { data: attRecord } = await supabase
-                .from('attendance')
-                .select('*')
-                .eq('employee_id', request.employee_id)
-                .eq('attendance_date', request.attendance_date)
-                .maybeSingle();
-
-            if (attRecord) {
-                attendanceRecord = attRecord;
-                console.log('✅ Found attendance by employee/date:', attendanceRecord.id);
-            }
-        }
-
-        if (!attendanceRecord) {
-            console.error('❌ Could not find attendance record');
-            return res.status(404).json({
-                success: false,
-                message: 'Attendance record not found for this regularization request'
-            });
-        }
-
-        // Convert to UTC for database storage
-        const clockOutUTC = new Date(clockOutDate);
-        clockOutUTC.setMinutes(clockOutUTC.getMinutes() - (5.5 * 60));
-
-        // Update attendance record (only if not already regularized)
-        if (!attendanceRecord.is_regularized) {
-            const { error: updateError } = await supabase
-                .from('attendance')
-                .update({
-                    clock_out: clockOutUTC.toISOString(),
-                    clock_out_ist: clockOutIST,
-                    total_hours: parseFloat(totalHours.toFixed(2)),
-                    total_minutes: totalMinutes,
-                    total_hours_display: `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`,
-                    status: totalMinutes >= 540 ? 'present' : totalMinutes >= 300 ? 'half_day' : 'absent',
-                    is_regularized: true,
-                    regularization_approved: true,
-                    regularization_approved_at: new Date().toISOString(),
-                    admin_notes: admin_notes || null
-                })
-                .eq('id', attendanceRecord.id);
-
-            if (updateError) {
-                console.error('❌ Attendance update error:', updateError);
-                throw updateError;
-            }
-            console.log('✅ Attendance updated successfully');
-        }
-
-        // Also update the regularization request's attendance_id if it was wrong
-        if (attendanceIdRaw !== attendanceRecord.id) {
-            console.log('🔄 Fixing attendance_id in regularization request from', attendanceIdRaw, 'to', attendanceRecord.id);
-            await supabase
-                .from('regularization_requests')
-                .update({ attendance_id: attendanceRecord.id })
-                .eq('id', id);
-        }
-
-        // Update regularization request status
-        const { error: reqUpdateError } = await supabase
-            .from('regularization_requests')
+        // Update attendance record
+        const { error: attendanceUpdateError } = await supabase
+            .from('attendance')
             .update({
-                status: 'approved',
-                approved_at: new Date().toISOString(),
-                approved_clock_out_time: clockOutIST,
-                admin_notes: admin_notes || null
+                clock_out: istStringToUTCISO(clockOutIST),
+                clock_out_ist: clockOutIST,
+                total_hours: parseFloat(totalHours.toFixed(2)),
+                total_minutes: totalMinutes,
+                total_hours_display: totalHoursDisplay,
+                status: status,
+                is_regularized: true,
+                regularization_status: 'approved'
             })
+            .eq('id', request.attendance_id);
+
+        if (attendanceUpdateError) {
+            console.error('❌ Error updating attendance:', attendanceUpdateError);
+            throw attendanceUpdateError;
+        }
+
+        // IMPORTANT: Get numeric ID for the approver if needed
+        let approverNumericId = null;
+        if (approver_id && typeof approver_id === 'string' && approver_id.startsWith('HR')) {
+            const { data: approverData } = await supabase
+                .from('employees')
+                .select('id')
+                .eq('employee_id', approver_id)
+                .maybeSingle();
+
+            if (approverData) {
+                approverNumericId = approverData.id;
+                console.log('🔄 Converted approver_id from', approver_id, 'to numeric:', approverNumericId);
+            }
+        }
+
+        // Update regularization request - Use numeric ID for approved_by if column expects integer
+        const updateData = {
+            status: 'approved',
+            approved_at: new Date().toISOString(),
+            approved_clock_out_time: clockOutIST,
+            admin_notes: admin_notes || null
+        };
+
+        // Only add approved_by if we have a numeric ID or if the column accepts string
+        if (approverNumericId) {
+            updateData.approved_by = approverNumericId;
+        } else {
+            // If column accepts text, use the string ID
+            updateData.approved_by = approver_id;
+        }
+
+        const { error: requestUpdateError } = await supabase
+            .from('regularization_requests')
+            .update(updateData)
             .eq('id', id);
 
-        if (reqUpdateError) throw reqUpdateError;
+        if (requestUpdateError) {
+            console.error('❌ Error updating regularization request:', requestUpdateError);
+            throw requestUpdateError;
+        }
 
         console.log('✅ Regularization approved successfully');
 
@@ -1783,7 +1820,8 @@ exports.approveRegularization = async (req, res) => {
                 clock_in_time: request.clock_in_time,
                 approved_clock_out_time: clockOutIST,
                 total_hours: totalHours.toFixed(2),
-                total_minutes: totalMinutes
+                total_minutes: totalMinutes,
+                status: status
             }
         });
 
@@ -1796,8 +1834,6 @@ exports.approveRegularization = async (req, res) => {
         });
     }
 };
-
-// In your attendanceController.js - Update rejectRegularization
 
 exports.rejectRegularization = async (req, res) => {
     try {
@@ -1816,19 +1852,20 @@ exports.rejectRegularization = async (req, res) => {
             });
         }
 
-        // ADMIN CANNOT REJECT - Check first
-        if (userRole === 'admin') {
-            console.log('🚫 Admin attempted to reject regularization request');
-            return res.status(403).json({
-                success: false,
-                message: '❌ Admin cannot reject regularization requests. Only reporting managers can approve/reject requests from their team members.'
-            });
-        }
-
-        // Get the regularization request
+        // Get the regularization request with employee details
         const { data: request, error: fetchError } = await supabase
             .from('regularization_requests')
-            .select('*')
+            .select(`
+                *,
+                employee:employee_id (
+                    id,
+                    first_name,
+                    last_name,
+                    email,
+                    designation,
+                    reporting_manager
+                )
+            `)
             .eq('id', id)
             .maybeSingle();
 
@@ -1846,39 +1883,61 @@ exports.rejectRegularization = async (req, res) => {
             });
         }
 
-        // Check if user is the reporting manager of the request employee
-        const requestEmployee = await getEmployeeById(request.employee_id);
-        const approver = await getEmployeeById(approver_id);
+        const requestEmployee = request.employee;
 
-        if (!requestEmployee || !approver) {
-            return res.status(404).json({ success: false, message: 'User details not found' });
+        // ✅ FIXED: Allow admin to reject ALL requests
+        let isAuthorized = false;
+
+        if (userRole === 'admin') {
+            // ADMIN CAN REJECT ALL REQUESTS
+            isAuthorized = true;
+            console.log('✅ Admin authorized to reject regularization request');
+        } else {
+            // Non-admin (reporting manager) can reject requests from their team members
+            const approver = await getEmployeeById(approver_id);
+            if (!approver) {
+                return res.status(404).json({ success: false, message: 'Approver not found' });
+            }
+
+            const approverName = `${approver.first_name || ''} ${approver.last_name || ''}`.trim().toLowerCase();
+            const requestEmployeeReportingManager = (requestEmployee?.reporting_manager || '').trim().toLowerCase();
+
+            if (requestEmployeeReportingManager === approverName) {
+                isAuthorized = true;
+                console.log('✅ Reporting manager authorized to reject request');
+            }
         }
 
-        const requestEmployeeReportingManager = (requestEmployee.reporting_manager || '').trim().toLowerCase();
-        const approverName = `${approver.first_name || ''} ${approver.last_name || ''}`.trim().toLowerCase();
-
-        // Only reporting manager can reject
-        if (requestEmployeeReportingManager !== approverName) {
-            console.log(`🚫 ${approverName} is not the reporting manager for ${request.employee_id}`);
+        if (!isAuthorized) {
             return res.status(403).json({
                 success: false,
-                message: '❌ Only the reporting manager can reject regularization requests for their team members.'
+                message: '❌ You are not authorized to reject this regularization request.'
             });
         }
 
-        // Update the regularization request status
+        // Update regularization request
         const { error: requestUpdateError } = await supabase
             .from('regularization_requests')
             .update({
-                status: 'rejected',
+                status: 'approved',
                 approved_at: new Date().toISOString(),
-                rejection_reason: rejection_reason
+                approved_clock_out_time: clockOutIST,
+                admin_notes: admin_notes || null,
+                approved_by: approver_id  // <-- PROBLEM: approver_id is "HR001" but column expects integer
             })
             .eq('id', id);
 
         if (requestUpdateError) throw requestUpdateError;
 
-        console.log('✅ Regularization rejected successfully by reporting manager');
+        // Also update attendance record to show regularization was rejected
+        await supabase
+            .from('attendance')
+            .update({
+                regularization_status: 'rejected'
+            })
+            .eq('id', request.attendance_id);
+
+        console.log('✅ Regularization rejected successfully');
 
         res.json({
             success: true,
@@ -1959,7 +2018,11 @@ exports.getPendingRegularizations = async (req, res) => {
             // Determine if user can act on this request (approve/reject)
             let can_act = false;
 
-            if (!isAdmin) {
+            if (userRole === 'admin') {
+                // ✅ FIXED: Admin can act on ALL pending requests
+                can_act = request.status === 'pending';
+                console.log('👑 Admin can act on request:', can_act);
+            } else {
                 // Only reporting managers can act on their team's requests
                 const requestEmployeeReportingManager = (employee?.reporting_manager || '').trim().toLowerCase();
                 const approver = await getEmployeeById(userEmployeeId);
@@ -1968,6 +2031,7 @@ exports.getPendingRegularizations = async (req, res) => {
                 // User can act if they are the reporting manager AND request is pending
                 can_act = requestEmployeeReportingManager === approverName && request.status === 'pending';
             }
+
             // Admin cannot act on any request
 
             // In getPendingRegularizations function, ensure the attendance_id is correct
