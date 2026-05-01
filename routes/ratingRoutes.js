@@ -13,9 +13,7 @@ module.exports = (authenticateToken, requireAdmin) => {
     
     // Admin routes
     router.get('/all', authenticateToken, requireAdmin, ratingController.getAllRatings);
-
-    // Add this route in ratingRoutes.js
-router.post('/admin-rate', authenticateToken, requireAdmin, ratingController.adminRateEmployee);
+    router.post('/admin-rate', authenticateToken, requireAdmin, ratingController.adminRateEmployee);
     
     return router;
 };

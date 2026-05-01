@@ -322,7 +322,6 @@ const getEmployeeRatingHistory = async (req, res) => {
     }
 };
 
-// ✅ UPDATED: Get all ratings for admin (shows all ratings)
 const getAllRatings = async (req, res) => {
     try {
         const userRole = req.user?.role;
@@ -333,27 +332,67 @@ const getAllRatings = async (req, res) => {
 
         const { month, year, employee_id, rating_type } = req.query;
 
+        console.log('=== getAllRatings called ===');
+        console.log('Query params:', { month, year, employee_id, rating_type });
+        console.log('User role:', userRole);
+
+        // Start building the query
         let query = supabase
             .from('employee_ratings')
-            .select('*')
-            .order('rating_year', { ascending: false })
-            .order('rating_month', { ascending: false });
+            .select('*');
 
+        // Apply filters
         if (month && year) {
-            query = query.eq('rating_month', parseInt(month)).eq('rating_year', parseInt(year));
+            const monthNum = parseInt(month);
+            const yearNum = parseInt(year);
+            console.log('Filtering by month:', monthNum, 'year:', yearNum);
+            query = query.eq('rating_month', monthNum).eq('rating_year', yearNum);
         }
 
         if (employee_id) {
+            console.log('Filtering by employee_id:', employee_id);
             query = query.eq('employee_id', employee_id);
         }
 
         if (rating_type && rating_type !== 'all') {
+            console.log('Filtering by rating_type:', rating_type);
             query = query.eq('rated_by_role', rating_type);
         }
 
+        // Order by date
+        query = query.order('rating_year', { ascending: false })
+            .order('rating_month', { ascending: false });
+
         const { data: ratings, error } = await query;
 
-        if (error) throw error;
+        if (error) {
+            console.error('Database error:', error);
+            throw error;
+        }
+
+        console.log(`Found ${ratings?.length || 0} ratings in database`);
+
+        // If no ratings found, try to get all ratings to debug
+        if (!ratings || ratings.length === 0) {
+            console.log('No ratings found with filters, fetching all ratings for debugging...');
+            const { data: allRatings, error: allError } = await supabase
+                .from('employee_ratings')
+                .select('*')
+                .limit(10);
+
+            if (!allError && allRatings && allRatings.length > 0) {
+                console.log('Sample of all ratings in DB:', allRatings.map(r => ({
+                    id: r.id,
+                    employee_id: r.employee_id,
+                    rating: r.rating,
+                    rating_month: r.rating_month,
+                    rating_year: r.rating_year,
+                    rated_by_role: r.rated_by_role
+                })));
+            } else {
+                console.log('No ratings found in database at all!');
+            }
+        }
 
         // Fetch employee and rater details for each rating
         const formattedRatings = [];
@@ -365,6 +404,10 @@ const getAllRatings = async (req, res) => {
                 .eq('employee_id', rating.employee_id)
                 .maybeSingle();
 
+            if (empError) {
+                console.error(`Error fetching employee ${rating.employee_id}:`, empError);
+            }
+
             // Fetch rater details
             const { data: rater, error: mgrError } = await supabase
                 .from('employees')
@@ -372,35 +415,66 @@ const getAllRatings = async (req, res) => {
                 .eq('employee_id', rating.manager_id)
                 .maybeSingle();
 
+            if (mgrError) {
+                console.error(`Error fetching rater ${rating.manager_id}:`, mgrError);
+            }
+
+            // Determine month and year
+            const ratingMonth = rating.rating_month;
+            const ratingYear = rating.rating_year;
+
+            // Create month name
+            let monthName = '';
+            try {
+                monthName = new Date(ratingYear, ratingMonth - 1).toLocaleString('default', { month: 'long' });
+            } catch (e) {
+                monthName = `${ratingMonth}`;
+            }
+
+            // Determine rater role for display
+            let displayRaterRole = 'Manager';
+            if (rating.rated_by_role === 'admin') {
+                displayRaterRole = 'Admin';
+            } else if (rater?.role === 'admin') {
+                displayRaterRole = 'Admin';
+            }
+
             formattedRatings.push({
                 id: rating.id,
                 employee_id: rating.employee_id,
-                employee_name: employee ? `${employee.first_name || ''} ${employee.last_name || ''}`.trim() : 'Unknown',
-                department: employee?.department,
-                reporting_manager: employee?.reporting_manager,
+                employee_name: employee ? `${employee.first_name || ''} ${employee.last_name || ''}`.trim() : `Employee ${rating.employee_id}`,
+                department: employee?.department || 'N/A',
+                reporting_manager: employee?.reporting_manager || 'N/A',
                 rating: rating.rating,
                 rating_label: getRatingLabel(rating.rating),
-                comments: rating.comments,
-                month: rating.rating_month,
-                year: rating.rating_year,
-                month_name: new Date(rating.rating_year, rating.rating_month - 1).toLocaleString('default', { month: 'long' }),
+                comments: rating.comments || '',
+                month: ratingMonth,
+                year: ratingYear,
+                month_name: monthName,
                 rater_id: rating.manager_id,
-                rater_name: rater ? `${rater.first_name || ''} ${rater.last_name || ''}`.trim() : 'Unknown',
-                rater_role: rating.rated_by_role === 'admin' ? 'Admin' : (rater?.role === 'admin' ? 'Admin' : 'Manager'),
+                rater_name: rater ? `${rater.first_name || ''} ${rater.last_name || ''}`.trim() : 'System',
+                rater_role: displayRaterRole,
                 created_at: rating.created_at,
                 updated_at: rating.updated_at
             });
         }
 
+        console.log(`Formatted ${formattedRatings.length} ratings for response`);
+
         res.json({
             success: true,
             ratings: formattedRatings,
-            total: formattedRatings.length
+            total: formattedRatings.length,
+            filters_applied: { month, year, employee_id, rating_type }
         });
 
     } catch (error) {
         console.error('❌ Error fetching all ratings:', error);
-        res.status(500).json({ success: false, message: error.message });
+        res.status(500).json({
+            success: false,
+            message: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
     }
 };
 
@@ -472,7 +546,7 @@ const adminRateEmployee = async (req, res) => {
                     comments: comments || null,
                     rating_month: month,
                     rating_year: year,
-                    rated_by_role: 'admin'
+                    rated_by_role: 'admin'  // ✅ Make sure this is 'admin' not 'Admin'
                 }])
                 .select();
 
