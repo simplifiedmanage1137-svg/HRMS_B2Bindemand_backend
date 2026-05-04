@@ -425,10 +425,41 @@ exports.autoCloseStaleSessions = async () => {
     }
 };
 
-// Clock In function - Complete version
 exports.clockIn = async (req, res) => {
     try {
         const { employee_id, latitude, longitude, accuracy } = req.body;
+
+        // ========== BACKEND DEVICE VALIDATION ==========
+        const userAgent = req.headers['user-agent'] || '';
+        const isMobileUA = /android|webos|iphone|ipad|ipod|blackberry|windows phone|iemobile|opera mini|mobile/i.test(userAgent.toLowerCase());
+
+        // Check for tablet devices
+        const isTabletUA = /ipad|android(?!.*mobile)|tablet/i.test(userAgent.toLowerCase());
+
+        // Block mobile and tablet devices
+        if (isMobileUA || isTabletUA) {
+            console.log('❌ Mobile/Tablet device blocked from clock-in:', {
+                employee_id,
+                userAgent,
+                deviceType: isTabletUA ? 'Tablet' : 'Mobile'
+            });
+            return res.status(403).json({
+                success: false,
+                message: 'Attendance marking is not allowed from mobile or tablet devices. Please use a desktop or laptop computer with Chrome, Firefox, or Edge browser.'
+            });
+        }
+
+        // Also check for common mobile screen sizes via headers (if available)
+        const viewportWidth = req.headers['x-viewport-width'];
+        if (viewportWidth && parseInt(viewportWidth) < 768) {
+            console.log('❌ Small screen device blocked from clock-in:', { employee_id, viewportWidth });
+            return res.status(403).json({
+                success: false,
+                message: 'Attendance marking is not allowed from mobile devices. Please use a desktop or laptop computer.'
+            });
+        }
+
+        // ========== EXISTING VALIDATION ==========
         if (!employee_id) {
             return res.status(400).json({ success: false, message: 'Employee ID is required' });
         }
@@ -437,12 +468,13 @@ exports.clockIn = async (req, res) => {
             .from('employees')
             .select('*')
             .eq('employee_id', employee_id);
+
         if (!employees || employees.length === 0) {
             return res.status(404).json({ success: false, message: 'Employee not found' });
         }
         const emp = employees[0];
 
-        // ✅ NEW: Check for any incomplete attendance record from previous day(s)
+        // Check for any incomplete attendance record from previous day(s)
         const todayIST = nowIST().split(' ')[0];
         const { data: incompleteRecords } = await supabase
             .from('attendance')
@@ -478,32 +510,15 @@ exports.clockIn = async (req, res) => {
 
         if (activeSessions && activeSessions.length > 0) {
             const activeSession = activeSessions[0];
-            // Compare using IST dates to avoid UTC midnight mismatch
             const sessionISTDate = utcMsToISTString(new Date(activeSession.clock_in_time).getTime()).split(' ')[0];
             const todayISTDate = nowIST().split(' ')[0];
 
             if (sessionISTDate !== todayISTDate) {
-                // Previous day's stale session - auto-close it WITHOUT blocking today's clock-in
-                const { data: attendanceRecords } = await supabase
-                    .from('attendance')
-                    .select('*')
-                    .eq('employee_id', employee_id)
-                    .eq('session_id', activeSession.session_id)
-                    .is('clock_out', null);
-
-                if (attendanceRecords && attendanceRecords.length > 0) {
-                    const attendance = attendanceRecords[0];
-                    // Mark previous day as missed clock-out (no clock_out set, just close session)
-                    // Employee can request regularization for this
-                }
-
                 // Close the stale session
                 await supabase
                     .from('attendance_sessions')
                     .update({ is_active: false, clock_out_time: new Date().toISOString() })
                     .eq('id', activeSession.id);
-
-                // Allow today's clock-in to proceed
             } else {
                 return res.status(400).json({
                     success: false,
@@ -521,7 +536,7 @@ exports.clockIn = async (req, res) => {
         const istDateForAttendance = clockInIST.split(' ')[0];
         const today = istDateForAttendance;
 
-        // ✅ ENHANCED: Better shift timing parsing with fallback
+        // Parse shift timing
         let shiftHour = 9, shiftMinute = 0;
         let shiftDisplay = emp.shift_timing || '9:00 AM - 6:00 PM';
 
@@ -530,17 +545,12 @@ exports.clockIn = async (req, res) => {
         if (emp.shift_timing) {
             let startTimeStr = emp.shift_timing.trim();
 
-            // Extract start time from shift range (e.g., "9:00 AM - 6:00 PM")
             if (startTimeStr.includes('-')) {
                 startTimeStr = startTimeStr.split('-')[0].trim();
             }
 
-            console.log(`🔍 Extracted start time: "${startTimeStr}"`);
-
-            // Try multiple parsing patterns
             let parsed = false;
 
-            // Pattern 1: "9:00 AM" or "3:00 PM"
             const ampmMatch = startTimeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
             if (ampmMatch) {
                 let hour = parseInt(ampmMatch[1]);
@@ -556,7 +566,6 @@ exports.clockIn = async (req, res) => {
                 console.log(`✅ Parsed AM/PM format: ${hour}:${minute} (${ampm})`);
             }
 
-            // Pattern 2: "15:00" (24-hour format)
             if (!parsed) {
                 const militaryMatch = startTimeStr.match(/(\d{1,2}):(\d{2})/);
                 if (militaryMatch) {
@@ -567,7 +576,6 @@ exports.clockIn = async (req, res) => {
                 }
             }
 
-            // Pattern 3: Just hour "9" or "15"
             if (!parsed) {
                 const hourMatch = startTimeStr.match(/^(\d{1,2})$/);
                 if (hourMatch) {
@@ -585,7 +593,7 @@ exports.clockIn = async (req, res) => {
             }
         }
 
-        // Late calculation using IST-aware UTC ms diff
+        // Late calculation
         const shiftStartIST = `${istDateForAttendance} ${String(shiftHour).padStart(2, '0')}:${String(shiftMinute).padStart(2, '0')}:00`;
         const clockInMs = toUTCMs(clockInIST);
         const shiftStartMs = toUTCMs(shiftStartIST);
@@ -613,7 +621,7 @@ exports.clockIn = async (req, res) => {
         const lateMinutesToSave = isLate ? parseFloat(lateMinutes.toFixed(4)) : 0;
         const earlyMinutesToSave = isEarly ? parseFloat(earlyMinutes.toFixed(4)) : 0;
 
-        // Check for existing attendance TODAY (using IST date)
+        // Check for existing attendance TODAY
         const { data: existingAttendance } = await supabase
             .from('attendance')
             .select('*')
@@ -652,7 +660,6 @@ exports.clockIn = async (req, res) => {
             status: 'present'
         };
 
-        // Add late_display only if column exists (try-catch on insert handles this)
         if (lateDisplay) {
             attendanceData.late_display = lateDisplay;
         }
@@ -664,7 +671,6 @@ exports.clockIn = async (req, res) => {
             .insert([attendanceData])
             .select());
 
-        // If late_display column doesn't exist, retry without it
         if (insertError && insertError.message && insertError.message.includes('late_display')) {
             console.log('⚠️ late_display column missing, retrying without it...');
             const { late_display: _removed, ...dataWithoutLateDisplay } = attendanceData;
@@ -688,7 +694,12 @@ exports.clockIn = async (req, res) => {
             is_active: true,
             latitude: latitude || null,
             longitude: longitude || null,
-            location_accuracy: accuracy || null
+            location_accuracy: accuracy || null,
+            device_info: {
+                user_agent: userAgent,
+                is_mobile: isMobileUA,
+                timestamp: new Date().toISOString()
+            }
         }]);
 
         let message = '✅ Clocked in on time';
@@ -709,13 +720,15 @@ exports.clockIn = async (req, res) => {
             session_id: sessionId,
             employee_name: `${emp.first_name} ${emp.last_name}`,
             attendance_date: today,
-            is_holiday: holidayCheck.isHoliday
+            is_holiday: holidayCheck.isHoliday,
+            device_blocked: false
         };
 
         console.log(`✅ Clock-in successful for ${employee_id}:`, {
             is_late: isLate,
             late_display: lateDisplay,
-            late_minutes: lateMinutesToSave
+            late_minutes: lateMinutesToSave,
+            device: isMobileUA ? 'Mobile (Blocked would have been blocked)' : 'Desktop (Allowed)'
         });
 
         res.json(response);
@@ -725,10 +738,24 @@ exports.clockIn = async (req, res) => {
         res.status(500).json({ success: false, message: 'Failed to clock in', error: error.message });
     }
 };
+
 exports.clockOut = async (req, res) => {
     try {
         console.log('📍 CLOCK-OUT REQUEST START');
         const { employee_id, session_id } = req.body;
+
+        // ========== BACKEND DEVICE VALIDATION ==========
+        const userAgent = req.headers['user-agent'] || '';
+        const isMobileUA = /android|webos|iphone|ipad|ipod|blackberry|windows phone|iemobile|opera mini|mobile/i.test(userAgent.toLowerCase());
+        const isTabletUA = /ipad|android(?!.*mobile)|tablet/i.test(userAgent.toLowerCase());
+
+        if (isMobileUA || isTabletUA) {
+            console.log('❌ Mobile/Tablet device blocked from clock-out:', { employee_id, userAgent });
+            return res.status(403).json({
+                success: false,
+                message: 'Attendance marking is not allowed from mobile or tablet devices. Please use a desktop or laptop computer.'
+            });
+        }
 
         if (!employee_id) {
             return res.status(400).json({
@@ -819,53 +846,45 @@ exports.clockOut = async (req, res) => {
         const queryTime = Date.now() - startTime;
         console.log(`✅ Query time: ${queryTime}ms`);
 
-        // Use IST strings for accurate diff (avoids UTC offset issues)
+        // Use IST strings for accurate diff
         const clockInIST = attendanceRecord.clock_in_ist || nowIST();
         const clockOutIST = nowIST();
 
         const clockInMs = toUTCMs(clockInIST);
         const clockOutMs = toUTCMs(clockOutIST);
         let totalMinutes = Math.round((clockOutMs - clockInMs) / (1000 * 60));
-        // midnight crossing guard
         if (totalMinutes < 0) totalMinutes += 24 * 60;
         const totalHours = totalMinutes / 60;
 
-        // Get expected work hours from shift timing
         const shiftTiming = parseShiftTiming(employee?.shift_timing);
         const expectedWorkHours = shiftTiming.totalHours || 9;
         const expectedWorkMinutes = expectedWorkHours * 60;
 
-        // ✅ UPDATED: Calculate status based on expected work hours
-        let status = 'half_day'; // Default to half_day
+        let status = 'half_day';
         if (totalMinutes >= expectedWorkMinutes) {
-            status = 'present';  // Full day (expected work hours or more)
+            status = 'present';
         } else if (totalMinutes < 300) {
-            status = 'absent';   // Less than 5 hours
+            status = 'absent';
         }
-        // Between 5 hours and expectedWorkMinutes = half_day
 
         const overtime = calculateOvertime(totalHours, shiftTiming.totalHours);
 
-        // Calculate display hours and minutes
         const displayHours = Math.floor(totalMinutes / 60);
         const displayMinutes = totalMinutes % 60;
         const totalHoursDisplay = `${displayHours}h ${displayMinutes}m`;
 
-        // Update attendance record
         const updateData = {
             clock_out: istStringToUTCISO(clockOutIST),
             clock_out_ist: clockOutIST,
             total_hours: parseFloat(totalHours.toFixed(2)),
             total_minutes: totalMinutes,
             total_hours_display: totalHoursDisplay,
-            status: status
+            status: status,
+            overtime_hours: overtime.overtimeHours,
+            overtime_minutes: overtime.overtimeMinutes,
+            overtime_amount: overtime.overtimeAmount,
+            has_overtime: overtime.hasOvertime
         };
-
-        // Add overtime fields
-        updateData.overtime_hours = overtime.overtimeHours;
-        updateData.overtime_minutes = overtime.overtimeMinutes;
-        updateData.overtime_amount = overtime.overtimeAmount;
-        updateData.has_overtime = overtime.hasOvertime;
 
         console.log(`⏱️ Total minutes: ${totalMinutes}, Expected: ${expectedWorkMinutes}, Status: ${status}`);
         console.log('⏱️ Updating attendance record...');
@@ -921,6 +940,7 @@ exports.clockOut = async (req, res) => {
         });
     }
 };
+
 // Clock Out for Missed/Previous Day Attendance - UPDATED to use current time
 exports.clockOutMissed = async (req, res) => {
     try {
