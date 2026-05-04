@@ -141,10 +141,6 @@ const employeeHasDirectReports = async (employeeName) => {
     return (data || []).some(emp => normalizeName(emp.reporting_manager) === normalizedManager);
 };
 
-// In your attendanceController.js - Update the canUserActOnRegularization function
-
-// In attendanceController.js - Update canUserActOnRegularization function
-
 const canUserActOnRegularization = async (userEmployeeId, userRole, requestEmployeeId) => {
     // If no user or request employee, deny access
     if (!userEmployeeId || !requestEmployeeId) return false;
@@ -1923,7 +1919,7 @@ exports.rejectRegularization = async (req, res) => {
                 approved_at: new Date().toISOString(),
                 approved_clock_out_time: clockOutIST,
                 admin_notes: admin_notes || null,
-                approved_by: approver_id  // <-- PROBLEM: approver_id is "HR001" but column expects integer
+                approved_by: approver_id
             })
             .eq('id', id);
 
