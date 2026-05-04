@@ -4,7 +4,7 @@ const attendanceController = require('../controllers/attendanceController');
 
 // Note: This module exports a function that takes supabase, authenticateToken, and requireAdmin
 module.exports = (supabase, authenticateToken, requireAdmin) => {
-    
+
     // Clock in/out endpoints
     router.post('/clock-in', attendanceController.clockIn);
     router.post('/clock-out', attendanceController.clockOut);
@@ -37,10 +37,9 @@ module.exports = (supabase, authenticateToken, requireAdmin) => {
     // Overtime endpoints (Admin or own data)
     router.get('/overtime/:employee_id/:month/:year', authenticateToken, attendanceController.getOvertimeSummary);
 
-    // Comp-off endpoints (Admin only)
-    router.get('/comp-off/:employee_id', authenticateToken, requireAdmin, attendanceController.getCompOffBalance);
-    router.get('/comp-off/:employee_id/history', authenticateToken, requireAdmin, attendanceController.getCompOffHistory);
-
+    // Comp-off endpoints - Allow employees to view their own data (controller handles authorization)
+    router.get('/comp-off/:employee_id', authenticateToken, attendanceController.getCompOffBalance);
+    router.get('/comp-off/:employee_id/history', authenticateToken, attendanceController.getCompOffHistory);
     // Auto-close stale sessions (Admin only)
     router.post('/auto-close-stale', authenticateToken, requireAdmin, async (req, res) => {
         const result = await attendanceController.autoCloseStaleSessions();
@@ -52,6 +51,23 @@ module.exports = (supabase, authenticateToken, requireAdmin) => {
 
     // Mark absent employees as leave (Admin only)
     router.post('/mark-absent-as-leave', authenticateToken, requireAdmin, attendanceController.markAbsentEmployeesAsLeave);
+
+    // Comp-off endpoints - Allow employees to view their own
+    router.get('/comp-off/:employee_id', authenticateToken, (req, res, next) => {
+        // Allow if admin OR if the employee is requesting their own data
+        if (req.user?.role === 'admin' || req.user?.employeeId === req.params.employee_id) {
+            return next();
+        }
+        return res.status(403).json({ success: false, message: 'Access denied' });
+    }, attendanceController.getCompOffBalance);
+
+    router.get('/comp-off/:employee_id/history', authenticateToken, (req, res, next) => {
+        // Allow if admin OR if the employee is requesting their own data
+        if (req.user?.role === 'admin' || req.user?.employeeId === req.params.employee_id) {
+            return next();
+        }
+        return res.status(403).json({ success: false, message: 'Access denied' });
+    }, attendanceController.getCompOffHistory);
 
     // Dashboard stats (Admin only)
     router.get('/dashboard-stats', authenticateToken, requireAdmin, async (req, res) => {

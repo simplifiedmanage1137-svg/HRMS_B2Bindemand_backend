@@ -2254,20 +2254,37 @@ exports.getCompOffBalance = async (req, res) => {
     }
 };
 
-// Get comp-off history
 exports.getCompOffHistory = async (req, res) => {
     try {
         const { employee_id } = req.params;
+        const userRole = req.user?.role;
+        const loggedInEmployeeId = req.user?.employeeId;
+
+        // Check authorization
+        if (userRole !== 'admin' && loggedInEmployeeId !== employee_id) {
+            return res.status(403).json({
+                success: false,
+                message: 'Access denied. You can only view your own comp-off history.'
+            });
+        }
+
         const { data, error } = await supabase
             .from('comp_off_earnings')
             .select('*')
             .eq('employee_id', employee_id)
             .order('attendance_date', { ascending: false });
+
         if (error) throw error;
+
         res.json({ success: true, earnings: data || [] });
+
     } catch (error) {
         console.error('Error fetching comp-off history:', error);
-        res.status(500).json({ success: false, message: 'Failed to fetch comp-off history', error: error.message });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch comp-off history',
+            error: error.message
+        });
     }
 };
 
