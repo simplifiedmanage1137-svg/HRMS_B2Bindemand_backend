@@ -1294,29 +1294,70 @@ const parseLocalDateTimeIST = (datetimeStr) => {
     return isNaN(parsed.getTime()) ? null : parsed;
 };
 
-// Get attendance report
+// Get attendance report - Updated to include leave status
 exports.getAttendanceReport = async (req, res) => {
     try {
         const { start, end, employee_id } = req.query;
         if (!start || !end) {
             return res.status(400).json({ success: false, message: 'Start and end dates are required' });
         }
+
         let query = supabase
             .from('attendance')
             .select('*, employees(first_name, last_name, department, shift_timing, comp_off_balance)')
             .gte('attendance_date', start)
             .lte('attendance_date', end);
+
         if (employee_id) query = query.eq('employee_id', employee_id);
         query = query.order('attendance_date', { ascending: false });
+
         const { data: attendance, error: attendanceError } = await query;
         if (attendanceError) throw attendanceError;
+
+        // ✅ NEW: Fetch approved leaves for the same date range
+        const { data: approvedLeaves, error: leaveError } = await supabase
+            .from('leaves')
+            .select('employee_id, start_date, end_date, leave_type, status')
+            .eq('status', 'approved')
+            .lte('start_date', end)
+            .gte('end_date', start);
+
+        if (leaveError) console.error('Error fetching leaves:', leaveError);
+
+        // Create a map of dates where employee is on leave
+        const leaveMap = {};
+        if (approvedLeaves) {
+            approvedLeaves.forEach(leave => {
+                const leaveStart = new Date(leave.start_date);
+                const leaveEnd = new Date(leave.end_date || leave.start_date);
+
+                for (let d = new Date(leaveStart); d <= leaveEnd; d.setDate(d.getDate() + 1)) {
+                    const dateStr = d.toISOString().split('T')[0];
+                    const key = `${leave.employee_id}-${dateStr}`;
+                    leaveMap[key] = {
+                        type: leave.leave_type,
+                        status: leave.status
+                    };
+                }
+            });
+        }
 
         const dedupedAttendanceMap = {};
         (attendance || []).forEach(record => {
             const dateKey = record.attendance_date ? record.attendance_date.split('T')[0] : record.attendance_date;
             const key = `${record.employee_id}-${dateKey}`;
+
+            // ✅ Check if employee is on leave on this date
+            const leaveInfo = leaveMap[key];
+
             const existing = dedupedAttendanceMap[key];
             if (!existing) {
+                // If on leave, override status
+                if (leaveInfo) {
+                    record.status = 'on_leave';
+                    record.leave_type = leaveInfo.type;
+                    record.leave_status = leaveInfo.status;
+                }
                 dedupedAttendanceMap[key] = record;
                 return;
             }
@@ -1324,15 +1365,30 @@ exports.getAttendanceReport = async (req, res) => {
             const existingClockOut = existing.clock_out_ist || existing.clock_out;
             const newClockOut = record.clock_out_ist || record.clock_out;
             if (newClockOut && !existingClockOut) {
+                if (leaveInfo) {
+                    record.status = 'on_leave';
+                    record.leave_type = leaveInfo.type;
+                    record.leave_status = leaveInfo.status;
+                }
                 dedupedAttendanceMap[key] = record;
             } else if (newClockOut && existingClockOut) {
                 const existingMs = toUTCMs(existingClockOut);
                 const newMs = toUTCMs(newClockOut);
                 if (newMs > existingMs) {
+                    if (leaveInfo) {
+                        record.status = 'on_leave';
+                        record.leave_type = leaveInfo.type;
+                        record.leave_status = leaveInfo.status;
+                    }
                     dedupedAttendanceMap[key] = record;
                 }
             } else if (!existingClockOut && !newClockOut) {
-                dedupedAttendanceMap[key] = record;
+                if (leaveInfo && !existing.leave_type) {
+                    existing.status = 'on_leave';
+                    existing.leave_type = leaveInfo.type;
+                    existing.leave_status = leaveInfo.status;
+                }
+                dedupedAttendanceMap[key] = existing;
             }
         });
 
@@ -1346,7 +1402,6 @@ exports.getAttendanceReport = async (req, res) => {
                 totalHoursDisplay = `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`;
             }
 
-            // Always recalculate late from clock_in_ist + shift_timing (fixes DB inconsistency)
             const shiftTiming = employee.shift_timing || record.shift_time_used;
             const late = recalculateLate(record.clock_in_ist, record.clock_in, shiftTiming, record.attendance_date);
 
@@ -1354,6 +1409,12 @@ exports.getAttendanceReport = async (req, res) => {
             if (!status) {
                 if (record.clock_in && !record.clock_out) status = 'working';
                 else if (record.clock_in && record.clock_out) status = 'present';
+                else status = 'absent';
+            }
+
+            // ✅ If on leave, keep that status
+            if (record.leave_type) {
+                status = 'on_leave';
             }
 
             return {
@@ -1370,7 +1431,6 @@ exports.getAttendanceReport = async (req, res) => {
                 late_minutes: late.late_minutes,
                 late_display: late.late_display,
                 early_minutes: record.early_minutes,
-                // Use current employee shift_timing (updated), fallback to shift_time_used (at clock-in)
                 shift_time_used: employee.shift_timing || record.shift_time_used,
                 is_holiday: record.is_holiday,
                 holiday_name: record.holiday_name,
@@ -1379,7 +1439,10 @@ exports.getAttendanceReport = async (req, res) => {
                 is_regularized: record.is_regularized || false,
                 first_name: employee.first_name || '',
                 last_name: employee.last_name || '',
-                department: employee.department || ''
+                department: employee.department || '',
+                // ✅ Add leave info
+                leave_type: record.leave_type || null,
+                is_on_leave: !!record.leave_type
             };
         });
 
@@ -1397,6 +1460,7 @@ exports.getAttendanceReport = async (req, res) => {
                 present: formattedAttendance.filter(a => a.status === 'present').length,
                 half_day: formattedAttendance.filter(a => a.status === 'half_day').length,
                 absent: formattedAttendance.filter(a => a.status === 'absent').length,
+                on_leave: formattedAttendance.filter(a => a.status === 'on_leave').length,
                 total_working_minutes: totalWorkingMinutes,
                 total_working_hours: Math.round((totalWorkingMinutes / 60) * 100) / 100,
                 total_working_hours_display: `${Math.floor(totalWorkingMinutes / 60)}h ${Math.round(totalWorkingMinutes % 60)}m`
@@ -2103,24 +2167,57 @@ exports.heartbeat = async (req, res) => {
     }
 };
 
-// Get employee attendance report
+// Get employee attendance report - Updated to include leave status
 exports.getEmployeeAttendanceReport = async (req, res) => {
     try {
         const { start, end } = req.query;
         const { employee_id } = req.params;
+
         if (req.user?.employeeId !== employee_id && req.user?.role !== 'admin') {
             return res.status(403).json({ success: false, message: 'Access denied' });
         }
+
         if (!start || !end) {
             return res.status(400).json({ success: false, message: 'Start and end dates are required' });
         }
-        const { data: attendance } = await supabase
+
+        const { data: attendance, error } = await supabase
             .from('attendance')
             .select('*, employees!inner(first_name, last_name, department, shift_timing, comp_off_balance)')
             .eq('employee_id', employee_id)
             .gte('attendance_date', start)
             .lte('attendance_date', end)
             .order('attendance_date', { ascending: false });
+
+        if (error) throw error;
+
+        // ✅ Fetch approved leaves for this employee
+        const { data: approvedLeaves, error: leaveError } = await supabase
+            .from('leaves')
+            .select('start_date, end_date, leave_type, status')
+            .eq('employee_id', employee_id)
+            .eq('status', 'approved')
+            .lte('start_date', end)
+            .gte('end_date', start);
+
+        if (leaveError) console.error('Error fetching leaves:', leaveError);
+
+        // Create leave map
+        const leaveMap = {};
+        if (approvedLeaves) {
+            approvedLeaves.forEach(leave => {
+                const leaveStart = new Date(leave.start_date);
+                const leaveEnd = new Date(leave.end_date || leave.start_date);
+
+                for (let d = new Date(leaveStart); d <= leaveEnd; d.setDate(d.getDate() + 1)) {
+                    const dateStr = d.toISOString().split('T')[0];
+                    leaveMap[dateStr] = {
+                        type: leave.leave_type,
+                        status: leave.status
+                    };
+                }
+            });
+        }
 
         const formattedAttendance = (attendance || []).map(record => {
             const employee = record.employees || {};
@@ -2132,7 +2229,6 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
                 totalHoursDisplay = `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`;
             }
 
-            // Always recalculate late from clock_in_ist + shift_timing (fixes DB inconsistency)
             const shiftTiming = employee.shift_timing || record.shift_time_used;
             const late = recalculateLate(record.clock_in_ist, record.clock_in, shiftTiming, record.attendance_date);
 
@@ -2140,6 +2236,13 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
             if (!status) {
                 if (record.clock_in && !record.clock_out) status = 'working';
                 else if (record.clock_in && record.clock_out) status = 'present';
+                else status = 'absent';
+            }
+
+            // ✅ Check if employee is on leave on this date
+            const leaveInfo = leaveMap[record.attendance_date];
+            if (leaveInfo) {
+                status = 'on_leave';
             }
 
             return {
@@ -2161,7 +2264,9 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
                 is_regularized: record.is_regularized || false,
                 first_name: employee.first_name || '',
                 last_name: employee.last_name || '',
-                department: employee.department || ''
+                department: employee.department || '',
+                leave_type: leaveInfo?.type || null,
+                is_on_leave: !!leaveInfo
             };
         });
 
@@ -2179,6 +2284,7 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
                 present: formattedAttendance.filter(a => a.status === 'present').length,
                 half_day: formattedAttendance.filter(a => a.status === 'half_day').length,
                 absent: formattedAttendance.filter(a => a.status === 'absent').length,
+                on_leave: formattedAttendance.filter(a => a.status === 'on_leave').length,
                 total_working_minutes: totalWorkingMinutes,
                 total_working_hours: Math.round((totalWorkingMinutes / 60) * 100) / 100,
                 total_working_hours_display: `${Math.floor(totalWorkingMinutes / 60)}h ${Math.round(totalWorkingMinutes % 60)}m`
