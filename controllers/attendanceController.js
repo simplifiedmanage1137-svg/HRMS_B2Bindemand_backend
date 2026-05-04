@@ -91,18 +91,15 @@ const normalizeName = (value) => {
 const getEmployeeById = async (employeeId) => {
     if (!employeeId) return null;
 
-    // Try both string and numeric lookup
     let query = supabase
         .from('employees')
         .select('id, employee_id, first_name, last_name, reporting_manager, designation');
 
-    // If employeeId is a number or numeric string, try that first
     if (!isNaN(employeeId)) {
         const { data, error } = await query.eq('id', parseInt(employeeId)).maybeSingle();
         if (!error && data) return data;
     }
 
-    // Try by string employee_id
     const { data, error } = await query.eq('employee_id', String(employeeId)).maybeSingle();
 
     if (error) {
@@ -142,45 +139,34 @@ const employeeHasDirectReports = async (employeeName) => {
 };
 
 const canUserActOnRegularization = async (userEmployeeId, userRole, requestEmployeeId) => {
-    // If no user or request employee, deny access
     if (!userEmployeeId || !requestEmployeeId) return false;
 
-    // Get request employee details
     const requestEmployee = await getEmployeeById(requestEmployeeId);
     if (!requestEmployee) return false;
 
-    // Get approver details
     const approver = await getEmployeeById(userEmployeeId);
     if (!approver) return false;
 
     const approverName = `${approver.first_name || ''} ${approver.last_name || ''}`.trim().toLowerCase();
     const requestEmployeeName = `${requestEmployee.first_name || ''} ${requestEmployee.last_name || ''}`.trim().toLowerCase();
 
-    // Check if the approver is the request employee themselves (can't approve own request)
     if (approverName === requestEmployeeName) {
         return false;
     }
 
-    // Check if request employee is a Team Leader/Manager
     const requestEmployeeDesignation = requestEmployee.designation || '';
     const isRequestEmployeeManager = isTeamLeaderDesignation(requestEmployeeDesignation);
 
-    // ADMIN ROLE: Can approve/reject requests from Team Leaders/Managers
     if (userRole === 'admin') {
-        // Admin can approve/reject requests from Team Leaders/Managers
         if (isRequestEmployeeManager) {
             return true;
         }
-        // Admin cannot approve/reject regular employee requests
         return false;
     }
 
-    // For non-admin users (team leaders/managers)
-    // Team leader/manager can approve/reject requests from their team members
     const requestEmployeeReportingManager = (requestEmployee.reporting_manager || '').trim().toLowerCase();
     const isReportingManager = requestEmployeeReportingManager && approverName === requestEmployeeReportingManager;
 
-    // Also check if the approver is the direct reporting manager
     if (isReportingManager) {
         return true;
     }
@@ -188,7 +174,6 @@ const canUserActOnRegularization = async (userEmployeeId, userRole, requestEmplo
     return false;
 };
 
-// Helper function to check if employee is Team Leader/Manager
 const isTeamLeaderDesignation = (designation) => {
     if (!designation) return false;
     const d = designation.toLowerCase();
@@ -197,17 +182,12 @@ const isTeamLeaderDesignation = (designation) => {
         d.includes('head') || d.includes('supervisor');
 };
 
-// Helper function to check if user can view a regularization request
 const canUserViewRegularization = async (userEmployeeId, userRole, requestEmployeeId) => {
     if (!userEmployeeId || !requestEmployeeId) return false;
 
-    // Employee can view their own requests
     if (userEmployeeId === requestEmployeeId) return true;
-
-    // Admin can view all requests
     if (userRole === 'admin') return true;
 
-    // Reporting manager can view their team's requests
     const requestEmployee = await getEmployeeById(requestEmployeeId);
     if (!requestEmployee) return false;
 
@@ -222,7 +202,6 @@ const canUserViewRegularization = async (userEmployeeId, userRole, requestEmploy
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
-// Current time as IST string "YYYY-MM-DD HH:MM:SS"
 const nowIST = () => {
     const now = new Date();
     const utcMs = now.getTime();
@@ -237,28 +216,23 @@ const nowIST = () => {
     return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
 };
 
-// Parse any time value → UTC ms (safe for diff calculations)
 const toUTCMs = (val) => {
     if (!val) return null;
     if (val instanceof Date) return isNaN(val.getTime()) ? null : val.getTime();
     const s = String(val).trim();
-    // UTC ISO string (has Z or +offset)
     if (/[Zz]$/.test(s) || /[+-]\d{2}:?\d{2}$/.test(s)) {
         const d = new Date(s);
         return isNaN(d.getTime()) ? null : d.getTime();
     }
-    // IST local string "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS"
     const clean = s.replace('T', ' ').substring(0, 19);
     const [datePart, timePart] = clean.split(' ');
     if (!datePart || !timePart) return null;
     const [y, mo, d] = datePart.split('-').map(Number);
     const [h, mi, sec = 0] = timePart.split(':').map(Number);
     if ([y, mo, d, h, mi].some(isNaN)) return null;
-    // Treat as IST → subtract IST offset to get UTC ms
     return Date.UTC(y, mo - 1, d, h, mi, sec) - IST_OFFSET_MS;
 };
 
-// Convert UTC ms → IST string "YYYY-MM-DD HH:MM:SS"
 const utcMsToISTString = (ms) => {
     if (ms == null || isNaN(ms)) return null;
     const ist = new Date(ms + IST_OFFSET_MS);
@@ -271,13 +245,11 @@ const utcMsToISTString = (ms) => {
     return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
 };
 
-// IST string → UTC ISO string (for DB clock_in / clock_out columns)
 const istStringToUTCISO = (istStr) => {
     const ms = toUTCMs(istStr);
     return ms != null ? new Date(ms).toISOString() : null;
 };
 
-// Check if a date is a holiday
 const isHoliday = (date) => {
     const dateStr = date.toISOString().split('T')[0];
     const dayOfWeek = date.getDay();
@@ -291,15 +263,20 @@ const isHoliday = (date) => {
     return { isHoliday: false };
 };
 
-// Recalculate late marks - fully IST-aware
-const recalculateLate = (clockInIst, clockIn, shiftTiming, attendanceDate) => {
+// ✅ CORRECTED recalculateLate function - uses stored shift_time_used first
+const recalculateLate = (clockInIst, clockIn, storedShiftTiming, currentShiftTiming, attendanceDate) => {
     const clockInMs = toUTCMs(clockInIst || clockIn);
     if (clockInMs == null) return { late_minutes: 0, late_display: null, is_late: false };
 
-    // Parse shift start from shiftTiming string
     let shiftHour = 9, shiftMinute = 0;
-    if (shiftTiming) {
-        let s = shiftTiming.trim();
+    let shiftStringToUse = storedShiftTiming;
+
+    if (!shiftStringToUse) {
+        shiftStringToUse = currentShiftTiming;
+    }
+
+    if (shiftStringToUse) {
+        let s = shiftStringToUse.trim();
         if (s.includes('-')) s = s.split('-')[0].trim();
         const m = s.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
         if (m) {
@@ -314,7 +291,6 @@ const recalculateLate = (clockInIst, clockIn, shiftTiming, attendanceDate) => {
         }
     }
 
-    // Build shift start as IST string then convert to UTC ms
     const [ay, am, ad] = String(attendanceDate).substring(0, 10).split('-').map(Number);
     const shiftStartIST = `${ay}-${String(am).padStart(2, '0')}-${String(ad).padStart(2, '0')} ${String(shiftHour).padStart(2, '0')}:${String(shiftMinute).padStart(2, '0')}:00`;
     const shiftStartMs = toUTCMs(shiftStartIST);
@@ -340,7 +316,6 @@ const recalculateLate = (clockInIst, clockIn, shiftTiming, attendanceDate) => {
     };
 };
 
-// Format late time for display
 const formatLateTime = (lateMinutes) => {
     if (!lateMinutes || lateMinutes <= 0) return null;
     const totalMinutes = lateMinutes;
@@ -429,14 +404,10 @@ exports.clockIn = async (req, res) => {
     try {
         const { employee_id, latitude, longitude, accuracy } = req.body;
 
-        // ========== BACKEND DEVICE VALIDATION ==========
         const userAgent = req.headers['user-agent'] || '';
         const isMobileUA = /android|webos|iphone|ipad|ipod|blackberry|windows phone|iemobile|opera mini|mobile/i.test(userAgent.toLowerCase());
-
-        // Check for tablet devices
         const isTabletUA = /ipad|android(?!.*mobile)|tablet/i.test(userAgent.toLowerCase());
 
-        // Block mobile and tablet devices
         if (isMobileUA || isTabletUA) {
             console.log('❌ Mobile/Tablet device blocked from clock-in:', {
                 employee_id,
@@ -449,7 +420,6 @@ exports.clockIn = async (req, res) => {
             });
         }
 
-        // Also check for common mobile screen sizes via headers (if available)
         const viewportWidth = req.headers['x-viewport-width'];
         if (viewportWidth && parseInt(viewportWidth) < 768) {
             console.log('❌ Small screen device blocked from clock-in:', { employee_id, viewportWidth });
@@ -459,7 +429,6 @@ exports.clockIn = async (req, res) => {
             });
         }
 
-        // ========== EXISTING VALIDATION ==========
         if (!employee_id) {
             return res.status(400).json({ success: false, message: 'Employee ID is required' });
         }
@@ -474,7 +443,6 @@ exports.clockIn = async (req, res) => {
         }
         const emp = employees[0];
 
-        // Check for any incomplete attendance record from previous day(s)
         const todayIST = nowIST().split(' ')[0];
         const { data: incompleteRecords } = await supabase
             .from('attendance')
@@ -501,7 +469,6 @@ exports.clockIn = async (req, res) => {
             });
         }
 
-        // Check for existing active session
         const { data: activeSessions } = await supabase
             .from('attendance_sessions')
             .select('*')
@@ -514,7 +481,6 @@ exports.clockIn = async (req, res) => {
             const todayISTDate = nowIST().split(' ')[0];
 
             if (sessionISTDate !== todayISTDate) {
-                // Close the stale session
                 await supabase
                     .from('attendance_sessions')
                     .update({ is_active: false, clock_out_time: new Date().toISOString() })
@@ -531,12 +497,10 @@ exports.clockIn = async (req, res) => {
         const sessionId = generateSessionId();
         const holidayCheck = isHoliday(now);
 
-        // IST time string for clock-in
         const clockInIST = nowIST();
         const istDateForAttendance = clockInIST.split(' ')[0];
         const today = istDateForAttendance;
 
-        // Parse shift timing
         let shiftHour = 9, shiftMinute = 0;
         let shiftDisplay = emp.shift_timing || '9:00 AM - 6:00 PM';
 
@@ -593,7 +557,6 @@ exports.clockIn = async (req, res) => {
             }
         }
 
-        // Late calculation
         const shiftStartIST = `${istDateForAttendance} ${String(shiftHour).padStart(2, '0')}:${String(shiftMinute).padStart(2, '0')}:00`;
         const clockInMs = toUTCMs(clockInIST);
         const shiftStartMs = toUTCMs(shiftStartIST);
@@ -621,7 +584,6 @@ exports.clockIn = async (req, res) => {
         const lateMinutesToSave = isLate ? parseFloat(lateMinutes.toFixed(4)) : 0;
         const earlyMinutesToSave = isEarly ? parseFloat(earlyMinutes.toFixed(4)) : 0;
 
-        // Check for existing attendance TODAY
         const { data: existingAttendance } = await supabase
             .from('attendance')
             .select('*')
@@ -664,7 +626,6 @@ exports.clockIn = async (req, res) => {
             attendanceData.late_display = lateDisplay;
         }
 
-        // Insert attendance record
         let insertedAttendance, insertError;
         ({ data: insertedAttendance, error: insertError } = await supabase
             .from('attendance')
@@ -685,7 +646,6 @@ exports.clockIn = async (req, res) => {
             throw insertError;
         }
 
-        // Create session
         await supabase.from('attendance_sessions').insert([{
             employee_id,
             session_id: sessionId,
@@ -744,7 +704,6 @@ exports.clockOut = async (req, res) => {
         console.log('📍 CLOCK-OUT REQUEST START');
         const { employee_id, session_id } = req.body;
 
-        // ========== BACKEND DEVICE VALIDATION ==========
         const userAgent = req.headers['user-agent'] || '';
         const isMobileUA = /android|webos|iphone|ipad|ipod|blackberry|windows phone|iemobile|opera mini|mobile/i.test(userAgent.toLowerCase());
         const isTabletUA = /ipad|android(?!.*mobile)|tablet/i.test(userAgent.toLowerCase());
@@ -788,7 +747,6 @@ exports.clockOut = async (req, res) => {
             }
         }
 
-        // If no session_id provided, find the active session for this employee
         if (!finalSessionId) {
             console.log('🔍 No session_id provided, looking for active session...');
             const { data: activeSessions, error: sessionError } = await supabase
@@ -818,7 +776,6 @@ exports.clockOut = async (req, res) => {
             console.log(`✅ Found active session: ${finalSessionId}`);
         }
 
-        // Fetch attendance record with employee data
         console.log('⏱️ Fetching attendance record...');
         const { data: attendanceRecords, error: attendanceError } = await supabase
             .from('attendance')
@@ -846,7 +803,6 @@ exports.clockOut = async (req, res) => {
         const queryTime = Date.now() - startTime;
         console.log(`✅ Query time: ${queryTime}ms`);
 
-        // Use IST strings for accurate diff
         const clockInIST = attendanceRecord.clock_in_ist || nowIST();
         const clockOutIST = nowIST();
 
@@ -899,7 +855,6 @@ exports.clockOut = async (req, res) => {
             throw updateError;
         }
 
-        // Update session as inactive
         console.log('⏱️ Updating session...');
         const { error: sessionError } = await supabase
             .from('attendance_sessions')
@@ -941,7 +896,6 @@ exports.clockOut = async (req, res) => {
     }
 };
 
-// Clock Out for Missed/Previous Day Attendance - UPDATED to use current time
 exports.clockOutMissed = async (req, res) => {
     try {
         const { employee_id, attendance_id, attendance_date } = req.body;
@@ -950,7 +904,6 @@ exports.clockOutMissed = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Employee ID and Attendance ID are required' });
         }
 
-        // Get the attendance record
         const { data: attendance, error: fetchError } = await supabase
             .from('attendance')
             .select('*')
@@ -966,14 +919,9 @@ exports.clockOutMissed = async (req, res) => {
             return res.status(400).json({ success: false, message: 'This attendance record already has a clock-out time' });
         }
 
-        // ✅ FIX: Use current time for clock out, not fixed 9:00 PM
-        const currentIST = nowIST(); // e.g., "2026-04-30 00:50:00"
-
-        // Parse clock in time and current IST time
+        const currentIST = nowIST();
         const clockInTime = new Date(attendance.clock_in_ist || attendance.clock_in);
         const currentTime = new Date(currentIST);
-
-        // Use the current IST timestamp for clock-out. This correctly handles crossing midnight.
         const clockOutIST = currentIST;
 
         let totalMinutes = Math.round((currentTime - clockInTime) / (1000 * 60));
@@ -983,14 +931,9 @@ exports.clockOutMissed = async (req, res) => {
 
         console.log(`⏰ Clock out for ${attendance.attendance_date}: ${clockOutIST}`);
 
-        const clockOutDate = new Date(clockOutIST);
         const totalHours = totalMinutes / 60;
+        const totalHoursDisplay = `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`;
 
-        const displayHours = Math.floor(totalMinutes / 60);
-        const displayMinutes = totalMinutes % 60;
-        const totalHoursDisplay = `${displayHours}h ${displayMinutes}m`;
-
-        // Determine status
         const shiftTiming = parseShiftTiming(attendance.shift_time_used);
         const expectedWorkMinutes = (shiftTiming.totalHours || 9) * 60;
 
@@ -1001,7 +944,6 @@ exports.clockOutMissed = async (req, res) => {
             status = 'absent';
         }
 
-        // Update attendance
         const { error: updateError } = await supabase
             .from('attendance')
             .update({
@@ -1042,15 +984,13 @@ exports.clockOutMissed = async (req, res) => {
     }
 };
 
-// Get today's attendance
 exports.getTodayAttendance = async (req, res) => {
     try {
         const { employee_id } = req.params;
         if (!employee_id) return res.status(400).json({ success: false, message: 'Employee ID is required' });
-        // Use IST date for today - avoids UTC midnight mismatch
+
         const todayStr = nowIST().split(' ')[0];
 
-        // Get employee details first
         const { data: employees } = await supabase.from('employees').select('*').eq('employee_id', employee_id);
         if (!employees || employees.length === 0) {
             return res.status(404).json({ success: false, message: 'Employee not found' });
@@ -1064,6 +1004,7 @@ exports.getTodayAttendance = async (req, res) => {
             .eq('attendance_date', todayStr)
             .order('clock_in', { ascending: false })
             .limit(1);
+
         const { data: activeSession } = await supabase
             .from('attendance_sessions')
             .select('*')
@@ -1072,7 +1013,6 @@ exports.getTodayAttendance = async (req, res) => {
 
         let formattedAttendance = null;
 
-        // If there's an active session, also check for the associated attendance record
         let activeSessionAttendance = null;
         if (activeSession && activeSession.length > 0) {
             const session = activeSession[0];
@@ -1095,7 +1035,6 @@ exports.getTodayAttendance = async (req, res) => {
             }
         }
 
-        // Use today's attendance if it exists, otherwise use active session attendance
         const attendanceToProcess = todayAttendance && todayAttendance.length > 0 ? todayAttendance[0] : activeSessionAttendance;
 
         if (attendanceToProcess) {
@@ -1107,9 +1046,7 @@ exports.getTodayAttendance = async (req, res) => {
                 delete formattedAttendance.employees;
             }
 
-            // ✅ ENHANCED: Always recalculate late marks in real-time
             if (formattedAttendance.clock_in || formattedAttendance.clock_in_ist) {
-                // Parse clock in time
                 let clockInTime;
                 const clockInValue = formattedAttendance.clock_in_ist || formattedAttendance.clock_in;
 
@@ -1123,35 +1060,28 @@ exports.getTodayAttendance = async (req, res) => {
                 }
 
                 if (clockInTime && !isNaN(clockInTime.getTime())) {
-                    // Parse shift timing
                     let shiftHour = 9, shiftMinute = 0;
                     const shiftString = employee.shift_timing || formattedAttendance.shift_time_used;
 
                     if (shiftString) {
                         let startTimeStr = shiftString.trim();
-
                         if (startTimeStr.includes('-')) {
                             startTimeStr = startTimeStr.split('-')[0].trim();
                         }
-
                         let parsed = false;
 
-                        // Pattern 1: "9:00 AM" or "3:00 PM"
                         const ampmMatch = startTimeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
                         if (ampmMatch) {
                             let hour = parseInt(ampmMatch[1]);
                             const minute = parseInt(ampmMatch[2]);
                             const ampm = ampmMatch[3].toUpperCase();
-
                             if (ampm === 'PM' && hour !== 12) hour += 12;
                             if (ampm === 'AM' && hour === 12) hour = 0;
-
                             shiftHour = hour;
                             shiftMinute = minute;
                             parsed = true;
                         }
 
-                        // Pattern 2: "15:00" (24-hour format)
                         if (!parsed) {
                             const militaryMatch = startTimeStr.match(/(\d{1,2}):(\d{2})/);
                             if (militaryMatch) {
@@ -1161,7 +1091,6 @@ exports.getTodayAttendance = async (req, res) => {
                             }
                         }
 
-                        // Pattern 3: Just hour "9" or "15"
                         if (!parsed) {
                             const hourMatch = startTimeStr.match(/^(\d{1,2})$/);
                             if (hourMatch) {
@@ -1172,7 +1101,6 @@ exports.getTodayAttendance = async (req, res) => {
                         }
                     }
 
-                    // Create shift start time for today
                     const attendanceDate = new Date(formattedAttendance.attendance_date);
                     const shiftStartTime = new Date(
                         attendanceDate.getFullYear(),
@@ -1184,7 +1112,6 @@ exports.getTodayAttendance = async (req, res) => {
                         0
                     );
 
-                    // Calculate late time
                     const diffMs = clockInTime - shiftStartTime;
                     const isLate = diffMs > 0;
 
@@ -1193,14 +1120,11 @@ exports.getTodayAttendance = async (req, res) => {
 
                     if (isLate) {
                         lateMinutes = diffMs / (1000 * 60);
-
-                        // Format late display
                         const totalSeconds = Math.floor(diffMs / 1000);
                         const hours = Math.floor(totalSeconds / 3600);
                         const remainingSeconds = totalSeconds % 3600;
                         const minutes = Math.floor(remainingSeconds / 60);
                         const seconds = remainingSeconds % 60;
-
                         const parts = [];
                         if (hours > 0) parts.push(`${hours}h`);
                         if (minutes > 0) parts.push(`${minutes}m`);
@@ -1208,35 +1132,26 @@ exports.getTodayAttendance = async (req, res) => {
                         lateDisplay = parts.join(' ');
                     }
 
-                    // Update the formatted attendance with calculated values
                     formattedAttendance.late_minutes = isLate ? parseFloat(lateMinutes.toFixed(4)) : 0;
                     formattedAttendance.late_display = lateDisplay;
                     formattedAttendance.is_late = isLate;
 
-                    console.log(`📊 Real-time late calculation for ${employee_id}:`, {
-                        shift_start: `${shiftHour}:${shiftMinute.toString().padStart(2, '0')}`,
-                        clock_in: clockInTime.toLocaleString(),
-                        late_minutes: formattedAttendance.late_minutes,
-                        late_display: formattedAttendance.late_display,
-                        is_late: formattedAttendance.is_late
-                    });
+                    if (todayAttendance && todayAttendance.length > 0) {
+                        const storedLateMinutes = parseFloat(todayAttendance[0].late_minutes) || 0;
+                        const needsUpdate = Math.abs(storedLateMinutes - formattedAttendance.late_minutes) > 0.01 ||
+                            todayAttendance[0].late_display !== formattedAttendance.late_display;
 
-                    // Update database if values have changed significantly
-                    const storedLateMinutes = parseFloat(todayAttendance[0].late_minutes) || 0;
-                    const needsUpdate = Math.abs(storedLateMinutes - formattedAttendance.late_minutes) > 0.01 ||
-                        todayAttendance[0].late_display !== formattedAttendance.late_display;
-
-                    if (needsUpdate) {
-                        console.log(`🔄 Updating attendance record ${todayAttendance[0].id} with correct late marks`);
-                        const updatePayload = { late_minutes: formattedAttendance.late_minutes };
-                        // Only include late_display if it was previously stored (column exists)
-                        if (todayAttendance[0].hasOwnProperty('late_display')) {
-                            updatePayload.late_display = formattedAttendance.late_display;
+                        if (needsUpdate) {
+                            console.log(`🔄 Updating attendance record ${todayAttendance[0].id} with correct late marks`);
+                            const updatePayload = { late_minutes: formattedAttendance.late_minutes };
+                            if (todayAttendance[0].hasOwnProperty('late_display')) {
+                                updatePayload.late_display = formattedAttendance.late_display;
+                            }
+                            await supabase
+                                .from('attendance')
+                                .update(updatePayload)
+                                .eq('id', todayAttendance[0].id);
                         }
-                        await supabase
-                            .from('attendance')
-                            .update(updatePayload)
-                            .eq('id', todayAttendance[0].id);
                     }
                 }
             }
@@ -1265,6 +1180,7 @@ exports.getTodayAttendance = async (req, res) => {
                 }
             }
         }
+
         res.json({
             success: true,
             attendance: formattedAttendance,
@@ -1278,23 +1194,19 @@ exports.getTodayAttendance = async (req, res) => {
     }
 };
 
-// Helper function to parse IST datetime string
 const parseLocalDateTimeIST = (datetimeStr) => {
     if (!datetimeStr) return null;
     if (datetimeStr instanceof Date) return datetimeStr;
-
     if (typeof datetimeStr === 'string' && datetimeStr.includes(' ')) {
         const [datePart, timePart] = datetimeStr.split(' ');
         const [year, month, day] = datePart.split('-');
         const [hour, minute, second] = timePart.split(':');
         return new Date(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hour), parseInt(minute), parseInt(second || 0));
     }
-
     const parsed = new Date(datetimeStr);
     return isNaN(parsed.getTime()) ? null : parsed;
 };
 
-// Get attendance report - Updated to include leave status
 exports.getAttendanceReport = async (req, res) => {
     try {
         const { start, end, employee_id } = req.query;
@@ -1314,7 +1226,6 @@ exports.getAttendanceReport = async (req, res) => {
         const { data: attendance, error: attendanceError } = await query;
         if (attendanceError) throw attendanceError;
 
-        // ✅ NEW: Fetch approved leaves for the same date range
         const { data: approvedLeaves, error: leaveError } = await supabase
             .from('leaves')
             .select('employee_id, start_date, end_date, leave_type, status')
@@ -1324,20 +1235,15 @@ exports.getAttendanceReport = async (req, res) => {
 
         if (leaveError) console.error('Error fetching leaves:', leaveError);
 
-        // Create a map of dates where employee is on leave
         const leaveMap = {};
         if (approvedLeaves) {
             approvedLeaves.forEach(leave => {
                 const leaveStart = new Date(leave.start_date);
                 const leaveEnd = new Date(leave.end_date || leave.start_date);
-
                 for (let d = new Date(leaveStart); d <= leaveEnd; d.setDate(d.getDate() + 1)) {
                     const dateStr = d.toISOString().split('T')[0];
                     const key = `${leave.employee_id}-${dateStr}`;
-                    leaveMap[key] = {
-                        type: leave.leave_type,
-                        status: leave.status
-                    };
+                    leaveMap[key] = { type: leave.leave_type, status: leave.status };
                 }
             });
         }
@@ -1346,13 +1252,10 @@ exports.getAttendanceReport = async (req, res) => {
         (attendance || []).forEach(record => {
             const dateKey = record.attendance_date ? record.attendance_date.split('T')[0] : record.attendance_date;
             const key = `${record.employee_id}-${dateKey}`;
-
-            // ✅ Check if employee is on leave on this date
             const leaveInfo = leaveMap[key];
-
             const existing = dedupedAttendanceMap[key];
+
             if (!existing) {
-                // If on leave, override status
                 if (leaveInfo) {
                     record.status = 'on_leave';
                     record.leave_type = leaveInfo.type;
@@ -1402,8 +1305,13 @@ exports.getAttendanceReport = async (req, res) => {
                 totalHoursDisplay = `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`;
             }
 
-            const shiftTiming = employee.shift_timing || record.shift_time_used;
-            const late = recalculateLate(record.clock_in_ist, record.clock_in, shiftTiming, record.attendance_date);
+            const late = recalculateLate(
+                record.clock_in_ist,
+                record.clock_in,
+                record.shift_time_used,
+                employee.shift_timing,
+                record.attendance_date
+            );
 
             let status = record.status;
             if (!status) {
@@ -1412,7 +1320,6 @@ exports.getAttendanceReport = async (req, res) => {
                 else status = 'absent';
             }
 
-            // ✅ If on leave, keep that status
             if (record.leave_type) {
                 status = 'on_leave';
             }
@@ -1440,7 +1347,6 @@ exports.getAttendanceReport = async (req, res) => {
                 first_name: employee.first_name || '',
                 last_name: employee.last_name || '',
                 department: employee.department || '',
-                // ✅ Add leave info
                 leave_type: record.leave_type || null,
                 is_on_leave: !!record.leave_type
             };
@@ -1472,12 +1378,10 @@ exports.getAttendanceReport = async (req, res) => {
     }
 };
 
-// Get missed clock-outs with hours calculation
 exports.getMissedClockOuts = async (req, res) => {
     try {
         const { employee_id } = req.params;
 
-        // Get employee's shift timing
         const { data: employee, error: empError } = await supabase
             .from('employees')
             .select('shift_timing')
@@ -1489,7 +1393,6 @@ exports.getMissedClockOuts = async (req, res) => {
         const shiftTiming = parseShiftTiming(employee?.shift_timing);
         const expectedShiftHours = shiftTiming.totalHours || 9;
 
-        // Get records where clock_out IS NULL (missed clock-outs)
         const { data: missedRecords, error } = await supabase
             .from('attendance')
             .select('*, employees!inner(first_name, last_name, shift_timing)')
@@ -1515,7 +1418,6 @@ exports.getMissedClockOuts = async (req, res) => {
             const isToday = record.attendance_date === todayISTDate;
             const canRegularize = !isToday && !record.is_regularized && !record.regularization_requested;
 
-            // Format clock-in for display
             let clockInDisplay = clockInValue;
             if (clockInDisplay && typeof clockInDisplay === 'string' && clockInDisplay.includes(' ')) {
                 const timePart = clockInDisplay.split(' ')[1];
@@ -1544,18 +1446,10 @@ exports.getMissedClockOuts = async (req, res) => {
             });
         }
 
-        res.json({
-            success: true,
-            missed_clockouts: formattedRecords
-        });
-
+        res.json({ success: true, missed_clockouts: formattedRecords });
     } catch (error) {
         console.error('Error fetching missed clock-outs:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch missed clock-outs',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Failed to fetch missed clock-outs', error: error.message });
     }
 };
 
@@ -1578,10 +1472,7 @@ exports.requestRegularization = async (req, res) => {
         console.log('='.repeat(70));
 
         if (!attendance_id || !requested_clock_out_time) {
-            return res.status(400).json({
-                success: false,
-                message: 'Attendance ID and clock-out time are required'
-            });
+            return res.status(400).json({ success: false, message: 'Attendance ID and clock-out time are required' });
         }
 
         const { data: attendance, error: fetchError } = await supabase
@@ -1593,10 +1484,7 @@ exports.requestRegularization = async (req, res) => {
 
         if (fetchError || !attendance) {
             console.error('❌ Error fetching attendance:', fetchError);
-            return res.status(404).json({
-                success: false,
-                message: 'Attendance record not found'
-            });
+            return res.status(404).json({ success: false, message: 'Attendance record not found' });
         }
 
         console.log('✅ Found attendance record:', {
@@ -1606,20 +1494,13 @@ exports.requestRegularization = async (req, res) => {
         });
 
         if (attendance.clock_out || attendance.clock_out_ist) {
-            return res.status(400).json({
-                success: false,
-                message: 'This attendance record already has a clock-out time'
-            });
+            return res.status(400).json({ success: false, message: 'This attendance record already has a clock-out time' });
         }
 
         if (attendance.regularization_requested) {
-            return res.status(400).json({
-                success: false,
-                message: 'Regularization already requested for this record'
-            });
+            return res.status(400).json({ success: false, message: 'Regularization already requested for this record' });
         }
 
-        // Store the requested time in IST format
         let requestedTimeIST = requested_clock_out_time;
         if (requested_clock_out_time.includes('T')) {
             requestedTimeIST = requested_clock_out_time.replace('T', ' ');
@@ -1630,7 +1511,6 @@ exports.requestRegularization = async (req, res) => {
 
         console.log('📝 Storing requested time (IST):', requestedTimeIST);
 
-        // CRITICAL FIX: Get the numeric ID from the employees table
         const { data: employeeRecord, error: employeeError } = await supabase
             .from('employees')
             .select('id')
@@ -1639,19 +1519,13 @@ exports.requestRegularization = async (req, res) => {
 
         if (employeeError || !employeeRecord) {
             console.error('❌ Error finding employee record:', employeeError);
-            return res.status(404).json({
-                success: false,
-                message: 'Employee record not found'
-            });
+            return res.status(404).json({ success: false, message: 'Employee record not found' });
         }
 
         const numericEmployeeId = employeeRecord.id;
         const numericAttendanceId = parseInt(attendance_id);
         if (isNaN(numericAttendanceId)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid attendance ID'
-            });
+            return res.status(400).json({ success: false, message: 'Invalid attendance ID' });
         }
 
         console.log('🔄 Converted IDs:', {
@@ -1662,7 +1536,7 @@ exports.requestRegularization = async (req, res) => {
         });
 
         const regularizationData = {
-            employee_id: employee_id,  // Use numeric ID from employees table
+            employee_id: employee_id,
             attendance_id: numericAttendanceId,
             attendance_date: attendance_date || attendance.attendance_date,
             clock_in_time: attendance.clock_in_ist || attendance.clock_in,
@@ -1680,11 +1554,7 @@ exports.requestRegularization = async (req, res) => {
 
         if (reqError) {
             console.error('❌ Error creating regularization request:', reqError);
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to create regularization request',
-                error: reqError.message
-            });
+            return res.status(500).json({ success: false, message: 'Failed to create regularization request', error: reqError.message });
         }
 
         console.log('✅ Regularization request created successfully:', request.id);
@@ -1708,14 +1578,9 @@ exports.requestRegularization = async (req, res) => {
                 status: request.status
             }
         });
-
     } catch (error) {
         console.error('❌ Error requesting regularization:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to submit regularization request',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Failed to submit regularization request', error: error.message });
     }
 };
 
@@ -1734,7 +1599,6 @@ exports.approveRegularization = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Approved clock out time is required' });
         }
 
-        // Get the regularization request
         const { data: request, error: fetchError } = await supabase
             .from('regularization_requests')
             .select('*')
@@ -1749,7 +1613,6 @@ exports.approveRegularization = async (req, res) => {
             return res.status(400).json({ success: false, message: `Request already ${request.status}` });
         }
 
-        // Get request employee details
         const { data: requestEmployee, error: requestEmployeeError } = await supabase
             .from('employees')
             .select('designation, reporting_manager')
@@ -1763,7 +1626,6 @@ exports.approveRegularization = async (req, res) => {
         const requestEmployeeDesignation = requestEmployee?.designation || '';
         const isRequestEmployeeManager = isTeamLeaderDesignation(requestEmployeeDesignation);
 
-        // Check authorization
         let isAuthorized = false;
 
         if (userRole === 'admin') {
@@ -1785,13 +1647,9 @@ exports.approveRegularization = async (req, res) => {
         }
 
         if (!isAuthorized) {
-            return res.status(403).json({
-                success: false,
-                message: '❌ You are not authorized to approve this regularization request.'
-            });
+            return res.status(403).json({ success: false, message: '❌ You are not authorized to approve this regularization request.' });
         }
 
-        // Parse the approved clock out time
         let clockOutIST = approved_clock_out_time;
         if (clockOutIST.includes('T')) {
             clockOutIST = clockOutIST.replace('T', ' ');
@@ -1802,9 +1660,7 @@ exports.approveRegularization = async (req, res) => {
 
         console.log('⏰ Approved clock out time (IST):', clockOutIST);
 
-        // Calculate total hours
         const clockInTime = request.clock_in_time;
-
         const clockInMs = toUTCMs(clockInTime);
         const clockOutMs = toUTCMs(clockOutIST);
         let totalMinutes = Math.round((clockOutMs - clockInMs) / (1000 * 60));
@@ -1812,7 +1668,6 @@ exports.approveRegularization = async (req, res) => {
         const totalHours = totalMinutes / 60;
         const totalHoursDisplay = `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`;
 
-        // Get expected work hours from shift timing
         const { data: attendanceData } = await supabase
             .from('attendance')
             .select('shift_time_used')
@@ -1829,8 +1684,7 @@ exports.approveRegularization = async (req, res) => {
             status = 'absent';
         }
 
-        // Update attendance record
-        const { error: attendanceUpdateError } = await supabase
+        await supabase
             .from('attendance')
             .update({
                 clock_out: istStringToUTCISO(clockOutIST),
@@ -1844,12 +1698,6 @@ exports.approveRegularization = async (req, res) => {
             })
             .eq('id', request.attendance_id);
 
-        if (attendanceUpdateError) {
-            console.error('❌ Error updating attendance:', attendanceUpdateError);
-            throw attendanceUpdateError;
-        }
-
-        // IMPORTANT: Get numeric ID for the approver if needed
         let approverNumericId = null;
         if (approver_id && typeof approver_id === 'string' && approver_id.startsWith('HR')) {
             const { data: approverData } = await supabase
@@ -1857,14 +1705,11 @@ exports.approveRegularization = async (req, res) => {
                 .select('id')
                 .eq('employee_id', approver_id)
                 .maybeSingle();
-
             if (approverData) {
                 approverNumericId = approverData.id;
-                console.log('🔄 Converted approver_id from', approver_id, 'to numeric:', approverNumericId);
             }
         }
 
-        // Update regularization request - Use numeric ID for approved_by if column expects integer
         const updateData = {
             status: 'approved',
             approved_at: new Date().toISOString(),
@@ -1872,23 +1717,16 @@ exports.approveRegularization = async (req, res) => {
             admin_notes: admin_notes || null
         };
 
-        // Only add approved_by if we have a numeric ID or if the column accepts string
         if (approverNumericId) {
             updateData.approved_by = approverNumericId;
         } else {
-            // If column accepts text, use the string ID
             updateData.approved_by = approver_id;
         }
 
-        const { error: requestUpdateError } = await supabase
+        await supabase
             .from('regularization_requests')
             .update(updateData)
             .eq('id', id);
-
-        if (requestUpdateError) {
-            console.error('❌ Error updating regularization request:', requestUpdateError);
-            throw requestUpdateError;
-        }
 
         console.log('✅ Regularization approved successfully');
 
@@ -1904,14 +1742,9 @@ exports.approveRegularization = async (req, res) => {
                 status: status
             }
         });
-
     } catch (error) {
         console.error('❌ Error approving regularization:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to approve regularization',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Failed to approve regularization', error: error.message });
     }
 };
 
@@ -1926,13 +1759,9 @@ exports.rejectRegularization = async (req, res) => {
         console.log('📝 Rejecting regularization:', { id, rejection_reason, approver_id, role: userRole });
 
         if (!rejection_reason) {
-            return res.status(400).json({
-                success: false,
-                message: 'Rejection reason is required'
-            });
+            return res.status(400).json({ success: false, message: 'Rejection reason is required' });
         }
 
-        // Get the regularization request with employee details
         const { data: request, error: fetchError } = await supabase
             .from('regularization_requests')
             .select(`
@@ -1950,30 +1779,21 @@ exports.rejectRegularization = async (req, res) => {
             .maybeSingle();
 
         if (fetchError || !request) {
-            return res.status(404).json({
-                success: false,
-                message: 'Regularization request not found'
-            });
+            return res.status(404).json({ success: false, message: 'Regularization request not found' });
         }
 
         if (request.status !== 'pending') {
-            return res.status(400).json({
-                success: false,
-                message: `Request already ${request.status}`
-            });
+            return res.status(400).json({ success: false, message: `Request already ${request.status}` });
         }
 
         const requestEmployee = request.employee;
 
-        // ✅ FIXED: Allow admin to reject ALL requests
         let isAuthorized = false;
 
         if (userRole === 'admin') {
-            // ADMIN CAN REJECT ALL REQUESTS
             isAuthorized = true;
             console.log('✅ Admin authorized to reject regularization request');
         } else {
-            // Non-admin (reporting manager) can reject requests from their team members
             const approver = await getEmployeeById(approver_id);
             if (!approver) {
                 return res.status(404).json({ success: false, message: 'Approver not found' });
@@ -1989,48 +1809,30 @@ exports.rejectRegularization = async (req, res) => {
         }
 
         if (!isAuthorized) {
-            return res.status(403).json({
-                success: false,
-                message: '❌ You are not authorized to reject this regularization request.'
-            });
+            return res.status(403).json({ success: false, message: '❌ You are not authorized to reject this regularization request.' });
         }
 
-        // Update regularization request
-        const { error: requestUpdateError } = await supabase
+        await supabase
             .from('regularization_requests')
             .update({
-                status: 'approved',
-                approved_at: new Date().toISOString(),
-                approved_clock_out_time: clockOutIST,
-                admin_notes: admin_notes || null,
-                approved_by: approver_id
+                status: 'rejected',
+                reviewed_at: new Date().toISOString(),
+                rejection_reason: rejection_reason,
+                reviewed_by: approver_id
             })
             .eq('id', id);
 
-        if (requestUpdateError) throw requestUpdateError;
-
-        // Also update attendance record to show regularization was rejected
         await supabase
             .from('attendance')
-            .update({
-                regularization_status: 'rejected'
-            })
+            .update({ regularization_status: 'rejected' })
             .eq('id', request.attendance_id);
 
         console.log('✅ Regularization rejected successfully');
 
-        res.json({
-            success: true,
-            message: 'Regularization request rejected successfully'
-        });
-
+        res.json({ success: true, message: 'Regularization request rejected successfully' });
     } catch (error) {
         console.error('❌ Error rejecting regularization:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to reject regularization',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Failed to reject regularization', error: error.message });
     }
 };
 
@@ -2059,27 +1861,18 @@ exports.getPendingRegularizations = async (req, res) => {
             .order('created_at', { ascending: false });
 
         if (isAdmin) {
-            // Admin can see ALL requests
             console.log('👑 Admin viewing all regularization requests');
-            // No filter - admin sees everything
         } else {
-            // Employee/Manager - only see their own or their team's requests
             const approver = await getEmployeeById(userEmployeeId);
             const approverName = `${approver?.first_name || ''} ${approver?.last_name || ''}`.trim().toLowerCase();
 
             if (!approverName) {
-                console.log('❌ Could not fetch manager name');
                 return res.json({ success: true, requests: [] });
             }
 
-            // Get team members (employees who report to this manager)
             const teamEmployeeIds = await getTeamEmployeeIdsByManagerName(approverName);
-
-            // Also include the manager's own requests
             const employeeIds = [userEmployeeId, ...teamEmployeeIds];
-
             console.log(`👥 Manager ${approverName} can see requests for:`, employeeIds);
-
             query = query.in('employee_id', employeeIds);
         }
 
@@ -2095,26 +1888,18 @@ exports.getPendingRegularizations = async (req, res) => {
                 .eq('employee_id', request.employee_id)
                 .maybeSingle();
 
-            // Determine if user can act on this request (approve/reject)
             let can_act = false;
 
             if (userRole === 'admin') {
-                // ✅ FIXED: Admin can act on ALL pending requests
                 can_act = request.status === 'pending';
                 console.log('👑 Admin can act on request:', can_act);
             } else {
-                // Only reporting managers can act on their team's requests
                 const requestEmployeeReportingManager = (employee?.reporting_manager || '').trim().toLowerCase();
                 const approver = await getEmployeeById(userEmployeeId);
                 const approverName = `${approver?.first_name || ''} ${approver?.last_name || ''}`.trim().toLowerCase();
-
-                // User can act if they are the reporting manager AND request is pending
                 can_act = requestEmployeeReportingManager === approverName && request.status === 'pending';
             }
 
-            // Admin cannot act on any request
-
-            // In getPendingRegularizations function, ensure the attendance_id is correct
             formattedRequests.push({
                 id: request.id?.toString?.() ?? String(request.id),
                 employee_id: request.employee_id,
@@ -2123,7 +1908,7 @@ exports.getPendingRegularizations = async (req, res) => {
                 designation: employee?.designation || 'N/A',
                 reporting_manager: employee?.reporting_manager || 'N/A',
                 attendance_date: request.attendance_date,
-                attendance_id: request.attendance_id,  // This should be a number, not a string
+                attendance_id: request.attendance_id,
                 clock_in_time: request.clock_in_time,
                 requested_clock_out_time: request.requested_clock_out_time,
                 reason: request.reason,
@@ -2136,21 +1921,13 @@ exports.getPendingRegularizations = async (req, res) => {
             });
         }
 
-        res.json({
-            success: true,
-            requests: formattedRequests
-        });
+        res.json({ success: true, requests: formattedRequests });
     } catch (error) {
         console.error('❌ Error in getPendingRegularizations:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch requests',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Failed to fetch requests', error: error.message });
     }
 };
 
-// Heartbeat
 exports.heartbeat = async (req, res) => {
     try {
         const { employee_id, session_id, latitude, longitude } = req.body;
@@ -2167,7 +1944,6 @@ exports.heartbeat = async (req, res) => {
     }
 };
 
-// Get employee attendance report - Updated to include leave status
 exports.getEmployeeAttendanceReport = async (req, res) => {
     try {
         const { start, end } = req.query;
@@ -2191,7 +1967,6 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
 
         if (error) throw error;
 
-        // ✅ Fetch approved leaves for this employee
         const { data: approvedLeaves, error: leaveError } = await supabase
             .from('leaves')
             .select('start_date, end_date, leave_type, status')
@@ -2202,25 +1977,31 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
 
         if (leaveError) console.error('Error fetching leaves:', leaveError);
 
-        // Create leave map
         const leaveMap = {};
         if (approvedLeaves) {
             approvedLeaves.forEach(leave => {
                 const leaveStart = new Date(leave.start_date);
                 const leaveEnd = new Date(leave.end_date || leave.start_date);
-
                 for (let d = new Date(leaveStart); d <= leaveEnd; d.setDate(d.getDate() + 1)) {
                     const dateStr = d.toISOString().split('T')[0];
-                    leaveMap[dateStr] = {
-                        type: leave.leave_type,
-                        status: leave.status
-                    };
+                    leaveMap[dateStr] = { type: leave.leave_type, status: leave.status };
                 }
             });
         }
 
+        // ✅ CORRECTED: Removed duplicate 'late' declaration
         const formattedAttendance = (attendance || []).map(record => {
             const employee = record.employees || {};
+            
+            // ✅ SINGLE declaration of 'late' with correct 5 parameters
+            const late = recalculateLate(
+                record.clock_in_ist,
+                record.clock_in,
+                record.shift_time_used,
+                employee.shift_timing,
+                record.attendance_date
+            );
+            
             let totalHoursDisplay = '0h 0m';
             if (record.total_minutes) {
                 totalHoursDisplay = `${Math.floor(record.total_minutes / 60)}h ${Math.round(record.total_minutes % 60)}m`;
@@ -2229,9 +2010,6 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
                 totalHoursDisplay = `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`;
             }
 
-            const shiftTiming = employee.shift_timing || record.shift_time_used;
-            const late = recalculateLate(record.clock_in_ist, record.clock_in, shiftTiming, record.attendance_date);
-
             let status = record.status;
             if (!status) {
                 if (record.clock_in && !record.clock_out) status = 'working';
@@ -2239,11 +2017,8 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
                 else status = 'absent';
             }
 
-            // ✅ Check if employee is on leave on this date
             const leaveInfo = leaveMap[record.attendance_date];
-            if (leaveInfo) {
-                status = 'on_leave';
-            }
+            if (leaveInfo) status = 'on_leave';
 
             return {
                 id: record.id,
@@ -2296,7 +2071,6 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
     }
 };
 
-// Get overtime summary
 exports.getOvertimeSummary = async (req, res) => {
     try {
         const { employee_id, month, year } = req.params;
@@ -2338,7 +2112,6 @@ exports.getOvertimeSummary = async (req, res) => {
     }
 };
 
-// Get comp-off balance
 exports.getCompOffBalance = async (req, res) => {
     try {
         const { employee_id } = req.params;
@@ -2366,12 +2139,8 @@ exports.getCompOffHistory = async (req, res) => {
         const userRole = req.user?.role;
         const loggedInEmployeeId = req.user?.employeeId;
 
-        // Check authorization
         if (userRole !== 'admin' && loggedInEmployeeId !== employee_id) {
-            return res.status(403).json({
-                success: false,
-                message: 'Access denied. You can only view your own comp-off history.'
-            });
+            return res.status(403).json({ success: false, message: 'Access denied. You can only view your own comp-off history.' });
         }
 
         const { data, error } = await supabase
@@ -2381,20 +2150,13 @@ exports.getCompOffHistory = async (req, res) => {
             .order('attendance_date', { ascending: false });
 
         if (error) throw error;
-
         res.json({ success: true, earnings: data || [] });
-
     } catch (error) {
         console.error('Error fetching comp-off history:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch comp-off history',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Failed to fetch comp-off history', error: error.message });
     }
 };
 
-// Mark absent at day end
 exports.markAbsentAtDayEnd = async () => {
     try {
         const today = new Date().toISOString().split('T')[0];
@@ -2436,12 +2198,10 @@ exports.markAbsentAtDayEnd = async () => {
     }
 };
 
-// Update historical late marks for all attendance records
 exports.updateHistoricalLateMarks = async (req, res) => {
     try {
         console.log('🚀 Starting historical late marks update via API...');
 
-        // Get all attendance records with employee shift timing
         const { data: attendanceRecords, error: attendanceError } = await supabase
             .from('attendance')
             .select(`
@@ -2458,133 +2218,30 @@ exports.updateHistoricalLateMarks = async (req, res) => {
             .not('clock_in', 'is', null)
             .order('attendance_date', { ascending: false });
 
-        if (attendanceError) {
-            throw attendanceError;
-        }
+        if (attendanceError) throw attendanceError;
 
         console.log(`📊 Found ${attendanceRecords.length} attendance records to process`);
 
-        let updatedCount = 0;
-        let alreadyCorrectCount = 0;
-        let errorCount = 0;
+        let updatedCount = 0, alreadyCorrectCount = 0, errorCount = 0;
 
         for (const record of attendanceRecords) {
             try {
-                // Parse clock in time
-                let clockInTime;
-                const clockInValue = record.clock_in_ist || record.clock_in;
-
-                if (clockInValue && typeof clockInValue === 'string' && clockInValue.includes(' ')) {
-                    const [datePart, timePart] = clockInValue.split(' ');
-                    const [year, month, day] = datePart.split('-');
-                    const [hour, minute, second] = timePart.split(':');
-                    clockInTime = new Date(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hour), parseInt(minute), parseInt(second || 0));
-                } else {
-                    clockInTime = new Date(clockInValue);
-                }
-
-                if (!clockInTime || isNaN(clockInTime.getTime())) {
-                    console.log(`⚠️ Invalid clock in time for record ${record.id}: ${clockInValue}`);
-                    errorCount++;
-                    continue;
-                }
-
-                // Parse shift timing
-                let shiftHour = 9, shiftMinute = 0;
-                const shiftString = record.employees?.shift_timing || record.shift_time_used;
-
-                if (shiftString) {
-                    let startTimeStr = shiftString.trim();
-
-                    if (startTimeStr.includes('-')) {
-                        startTimeStr = startTimeStr.split('-')[0].trim();
-                    }
-
-                    let parsed = false;
-
-                    // Pattern 1: "9:00 AM" or "3:00 PM"
-                    const ampmMatch = startTimeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-                    if (ampmMatch) {
-                        let hour = parseInt(ampmMatch[1]);
-                        const minute = parseInt(ampmMatch[2]);
-                        const ampm = ampmMatch[3].toUpperCase();
-
-                        if (ampm === 'PM' && hour !== 12) hour += 12;
-                        if (ampm === 'AM' && hour === 12) hour = 0;
-
-                        shiftHour = hour;
-                        shiftMinute = minute;
-                        parsed = true;
-                    }
-
-                    // Pattern 2: "15:00" (24-hour format)
-                    if (!parsed) {
-                        const militaryMatch = startTimeStr.match(/(\d{1,2}):(\d{2})/);
-                        if (militaryMatch) {
-                            shiftHour = parseInt(militaryMatch[1]);
-                            shiftMinute = parseInt(militaryMatch[2]);
-                            parsed = true;
-                        }
-                    }
-
-                    // Pattern 3: Just hour "9" or "15"
-                    if (!parsed) {
-                        const hourMatch = startTimeStr.match(/^(\d{1,2})$/);
-                        if (hourMatch) {
-                            shiftHour = parseInt(hourMatch[1]);
-                            shiftMinute = 0;
-                            parsed = true;
-                        }
-                    }
-                }
-
-                // Create shift start time for the attendance date
-                const attendanceDate = new Date(record.attendance_date);
-                const shiftStartTime = new Date(
-                    attendanceDate.getFullYear(),
-                    attendanceDate.getMonth(),
-                    attendanceDate.getDate(),
-                    shiftHour,
-                    shiftMinute,
-                    0,
-                    0
+                const lateCalculation = recalculateLate(
+                    record.clock_in_ist,
+                    record.clock_in,
+                    record.shift_time_used,
+                    record.employees?.shift_timing,
+                    record.attendance_date
                 );
 
-                // Calculate late time
-                const diffMs = clockInTime - shiftStartTime;
-                const isLate = diffMs > 0; // Any delay is late
-
-                let lateMinutes = 0;
-                let lateDisplay = null;
-
-                if (isLate) {
-                    lateMinutes = diffMs / (1000 * 60);
-
-                    // Format late display
-                    const totalSeconds = Math.floor(diffMs / 1000);
-                    const hours = Math.floor(totalSeconds / 3600);
-                    const remainingSeconds = totalSeconds % 3600;
-                    const minutes = Math.floor(remainingSeconds / 60);
-                    const seconds = remainingSeconds % 60;
-
-                    const parts = [];
-                    if (hours > 0) parts.push(`${hours}h`);
-                    if (minutes > 0) parts.push(`${minutes}m`);
-                    if (seconds > 0 || (hours === 0 && minutes === 0)) parts.push(`${seconds}s`);
-                    lateDisplay = parts.join(' ');
-                }
-
-                const lateMinutesToSave = isLate ? parseFloat(lateMinutes.toFixed(4)) : 0;
-
-                // Check if update is needed
                 const currentLateMinutes = parseFloat(record.late_minutes) || 0;
-                const needsUpdate = Math.abs(currentLateMinutes - lateMinutesToSave) > 0.01 ||
-                    record.late_display !== lateDisplay;
+                const needsUpdate = Math.abs(currentLateMinutes - lateCalculation.late_minutes) > 0.01 ||
+                    record.late_display !== lateCalculation.late_display;
 
                 if (needsUpdate) {
-                    const updatePayload = { late_minutes: lateMinutesToSave };
+                    const updatePayload = { late_minutes: lateCalculation.late_minutes };
                     if (record.hasOwnProperty('late_display')) {
-                        updatePayload.late_display = lateDisplay;
+                        updatePayload.late_display = lateCalculation.late_display;
                     }
                     const { error: updateError } = await supabase
                         .from('attendance')
@@ -2592,60 +2249,40 @@ exports.updateHistoricalLateMarks = async (req, res) => {
                         .eq('id', record.id);
 
                     if (updateError) {
-                        console.error(`❌ Error updating record ${record.id}:`, updateError);
                         errorCount++;
                     } else {
                         updatedCount++;
-                        if (isLate) {
-                            console.log(`✅ Updated ${record.employee_id} (${record.attendance_date}): Late ${lateDisplay}`);
+                        if (lateCalculation.is_late) {
+                            console.log(`✅ Updated ${record.employee_id} (${record.attendance_date}): Late ${lateCalculation.late_display}`);
                         }
                     }
                 } else {
                     alreadyCorrectCount++;
                 }
-
             } catch (recordError) {
-                console.error(`❌ Error processing record ${record.id}:`, recordError);
                 errorCount++;
             }
         }
 
-        const result = {
+        res.json({
             success: true,
             message: 'Historical late marks update completed successfully',
             totalRecords: attendanceRecords.length,
             updatedCount,
             alreadyCorrectCount,
             errorCount
-        };
-
-        console.log('📈 HISTORICAL LATE MARKS UPDATE COMPLETED');
-        console.log(`✅ Updated records: ${updatedCount}`);
-        console.log(`✓ Already correct: ${alreadyCorrectCount}`);
-        console.log(`❌ Errors: ${errorCount}`);
-        console.log(`📊 Total processed: ${attendanceRecords.length}`);
-
-        res.json(result);
-
+        });
     } catch (error) {
         console.error('❌ Error in updateHistoricalLateMarks:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to update historical late marks',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Failed to update historical late marks', error: error.message });
     }
 };
 
-// Mark absent employees as leave (manual trigger)
 exports.markAbsentEmployeesAsLeave = async (req, res) => {
     try {
         console.log('🔄 Manual trigger: markAbsentEmployeesAsLeave called');
-
         const { markAbsentEmployeesAsLeave } = require('../cron/absentEmployeeCheck');
         const result = await markAbsentEmployeesAsLeave();
-
-        console.log('📊 Result from cron function:', result);
 
         if (result.success) {
             res.json({
@@ -2660,26 +2297,14 @@ exports.markAbsentEmployeesAsLeave = async (req, res) => {
                 }
             });
         } else {
-            console.error('❌ Cron function returned error:', result.error);
-            res.status(500).json({
-                success: false,
-                message: 'Failed to process absent employees',
-                error: result.error
-            });
+            res.status(500).json({ success: false, message: 'Failed to process absent employees', error: result.error });
         }
     } catch (error) {
         console.error('❌ Error in markAbsentEmployeesAsLeave API:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to process absent employees',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Failed to process absent employees', error: error.message });
     }
 };
 
-// Add this function to your attendanceController.js file (before module.exports = exports;)
-
-// Get team attendance report for reporting manager
 exports.getTeamAttendanceReport = async (req, res) => {
     try {
         const { start, end, employee_id, view_type } = req.query;
@@ -2687,17 +2312,13 @@ exports.getTeamAttendanceReport = async (req, res) => {
         const userRole = req.user?.role;
 
         console.log('📊 Fetching team attendance report for manager:', managerEmployeeId);
-        console.log('Query params:', { start, end, employee_id, view_type });
 
-        // Get manager details
         const manager = await getEmployeeById(managerEmployeeId);
         if (!manager) {
             return res.status(404).json({ success: false, message: 'Manager not found' });
         }
 
         const managerName = `${manager.first_name || ''} ${manager.last_name || ''}`.trim().toLowerCase();
-
-        // Get all team members (employees reporting to this manager)
         const teamEmployeeIds = await getTeamEmployeeIdsByManagerName(managerName);
 
         if (teamEmployeeIds.length === 0) {
@@ -2721,7 +2342,6 @@ exports.getTeamAttendanceReport = async (req, res) => {
             });
         }
 
-        // Get team member details
         const { data: teamMembers, error: teamError } = await supabase
             .from('employees')
             .select('employee_id, first_name, last_name, department, designation, joining_date, shift_timing')
@@ -2729,27 +2349,23 @@ exports.getTeamAttendanceReport = async (req, res) => {
 
         if (teamError) throw teamError;
 
-        // If specific employee requested, filter
         let targetEmployees = teamMembers;
         if (employee_id && teamEmployeeIds.includes(employee_id)) {
             targetEmployees = teamMembers.filter(emp => emp.employee_id === employee_id);
         }
 
-        // Set date range
-        let startDate, endDate;
         const today = new Date();
         const todayStr = today.toISOString().split('T')[0];
 
+        let startDate, endDate;
         if (view_type === 'daily' && start) {
             startDate = start;
             endDate = start;
         } else if (view_type === 'monthly') {
-            // Get salary cycle dates (26th to 25th)
             if (start && end) {
                 startDate = start;
                 endDate = end;
             } else {
-                // Default to current salary cycle
                 const currentDate = new Date();
                 if (currentDate.getDate() >= 26) {
                     startDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), 26).toISOString().split('T')[0];
@@ -2760,14 +2376,12 @@ exports.getTeamAttendanceReport = async (req, res) => {
                 }
             }
         } else {
-            // Default to current month
             startDate = new Date(today.getFullYear(), today.getMonth(), 1).toISOString().split('T')[0];
             endDate = todayStr;
         }
 
         console.log(`📅 Date range: ${startDate} to ${endDate}`);
 
-        // Fetch attendance for all team members
         const { data: attendanceData, error: attendanceError } = await supabase
             .from('attendance')
             .select('*, employees!inner(first_name, last_name, department, shift_timing)')
@@ -2778,7 +2392,6 @@ exports.getTeamAttendanceReport = async (req, res) => {
 
         if (attendanceError) throw attendanceError;
 
-        // Fetch leave data for the same period
         const { data: leaveData, error: leaveError } = await supabase
             .from('leaves')
             .select('*')
@@ -2789,28 +2402,21 @@ exports.getTeamAttendanceReport = async (req, res) => {
 
         if (leaveError) console.error('Error fetching leaves:', leaveError);
 
-        // Create leave map for quick lookup
         const leaveMap = {};
         (leaveData || []).forEach(leave => {
             const leaveStart = new Date(leave.start_date);
             const leaveEnd = new Date(leave.end_date);
-
             for (let d = new Date(leaveStart); d <= leaveEnd; d.setDate(d.getDate() + 1)) {
                 const dateStr = d.toISOString().split('T')[0];
                 const key = `${leave.employee_id}-${dateStr}`;
-                leaveMap[key] = {
-                    type: leave.leave_type,
-                    reason: leave.reason
-                };
+                leaveMap[key] = { type: leave.leave_type, reason: leave.reason };
             }
         });
 
-        // Process attendance data
         const formattedAttendance = [];
         const dailyStats = {};
         const employeeStats = {};
 
-        // Initialize employee stats
         targetEmployees.forEach(emp => {
             employeeStats[emp.employee_id] = {
                 employee_id: emp.employee_id,
@@ -2829,7 +2435,6 @@ exports.getTeamAttendanceReport = async (req, res) => {
             };
         });
 
-        // Get all dates in range
         const dateRange = [];
         let currentDate = new Date(startDate);
         const endDateTime = new Date(endDate);
@@ -2842,14 +2447,12 @@ exports.getTeamAttendanceReport = async (req, res) => {
             currentDate.setDate(currentDate.getDate() + 1);
         }
 
-        // Build attendance map
         const attendanceMap = {};
         (attendanceData || []).forEach(record => {
             const key = `${record.employee_id}-${record.attendance_date}`;
             attendanceMap[key] = record;
         });
 
-        // In getTeamAttendanceReport function - Update the status determination section
         for (const emp of targetEmployees) {
             for (const { date, isWeekend } of dateRange) {
                 const attendanceKey = `${emp.employee_id}-${date}`;
@@ -2882,7 +2485,6 @@ exports.getTeamAttendanceReport = async (req, res) => {
                     isLate = lateMinutes > 0;
                     overtimeHours = attendance.overtime_hours || 0;
 
-                    // Calculate total minutes worked
                     let totalMinutes = 0;
                     if (clockIn && clockOut) {
                         const clockInDate = new Date(clockIn);
@@ -2892,12 +2494,10 @@ exports.getTeamAttendanceReport = async (req, res) => {
                         totalHours = totalMinutes / 60;
                     }
 
-                    // Get expected work hours from employee's shift timing
                     const shiftTiming = parseShiftTiming(emp.shift_timing);
                     const expectedWorkHours = shiftTiming.totalHours || 9;
                     const expectedWorkMinutes = expectedWorkHours * 60;
 
-                    // ✅ UPDATED: Determine status based on actual working minutes vs expected
                     if (clockIn && clockOut && totalMinutes >= expectedWorkMinutes) {
                         status = 'present';
                         statusDisplay = 'P';
@@ -2905,23 +2505,20 @@ exports.getTeamAttendanceReport = async (req, res) => {
                         employeeStats[emp.employee_id].total_present++;
                         employeeStats[emp.employee_id].working_days_count++;
                         employeeStats[emp.employee_id].total_working_hours += totalHours;
-                    }
-                    else if (clockIn && clockOut && totalMinutes >= 300 && totalMinutes < expectedWorkMinutes) {
+                    } else if (clockIn && clockOut && totalMinutes >= 300 && totalMinutes < expectedWorkMinutes) {
                         status = 'half_day';
                         statusDisplay = 'HD';
                         statusColor = 'warning';
                         employeeStats[emp.employee_id].total_half_day++;
                         employeeStats[emp.employee_id].working_days_count++;
                         employeeStats[emp.employee_id].total_working_hours += totalHours;
-                    }
-                    else if (clockIn && !clockOut) {
+                    } else if (clockIn && !clockOut) {
                         status = 'working';
                         statusDisplay = 'W';
                         statusColor = 'info';
                         employeeStats[emp.employee_id].working_days_count++;
                         employeeStats[emp.employee_id].total_working_hours += totalHours;
-                    }
-                    else {
+                    } else {
                         employeeStats[emp.employee_id].total_absent++;
                     }
 
@@ -2937,8 +2534,6 @@ exports.getTeamAttendanceReport = async (req, res) => {
                     employeeStats[emp.employee_id].total_absent++;
                 }
 
-                // Rest of the code remains the same...
-                // Daily stats for today
                 if (date === todayStr) {
                     if (!dailyStats[date]) {
                         dailyStats[date] = {
@@ -2986,27 +2581,18 @@ exports.getTeamAttendanceReport = async (req, res) => {
             }
         }
 
-        // Calculate attendance rates and summary
         const totalWorkingDays = dateRange.filter(d => !d.isWeekend).length;
         const employeeSummary = Object.values(employeeStats).map(emp => {
-            const attendanceRate = totalWorkingDays > 0
-                ? ((emp.total_present + emp.total_half_day) / totalWorkingDays * 100).toFixed(1)
-                : 0;
-
+            const attendanceRate = totalWorkingDays > 0 ? ((emp.total_present + emp.total_half_day) / totalWorkingDays * 100).toFixed(1) : 0;
             return {
                 ...emp,
                 total_working_days: totalWorkingDays,
                 attendance_rate: attendanceRate,
-                avg_hours_per_day: emp.working_days_count > 0
-                    ? (emp.total_working_hours / emp.working_days_count).toFixed(1)
-                    : 0,
-                avg_late_minutes: emp.total_late_count > 0
-                    ? (emp.total_late_minutes / emp.total_late_count).toFixed(0)
-                    : 0
+                avg_hours_per_day: emp.working_days_count > 0 ? (emp.total_working_hours / emp.working_days_count).toFixed(1) : 0,
+                avg_late_minutes: emp.total_late_count > 0 ? (emp.total_late_minutes / emp.total_late_count).toFixed(0) : 0
             };
         });
 
-        // Calculate team summary for today
         const todayStats = dailyStats[todayStr] || {
             total_employees: targetEmployees.length,
             present: 0,
@@ -3035,19 +2621,12 @@ exports.getTeamAttendanceReport = async (req, res) => {
                 total_half_day_today: todayStats.half_day,
                 total_late_today: todayStats.late_count,
                 total_working_today: todayStats.working,
-                team_attendance_rate: totalWorkingDays > 0
-                    ? (employeeSummary.reduce((sum, e) => sum + parseFloat(e.attendance_rate), 0) / employeeSummary.length).toFixed(1)
-                    : 0
+                team_attendance_rate: totalWorkingDays > 0 ? (employeeSummary.reduce((sum, e) => sum + parseFloat(e.attendance_rate), 0) / employeeSummary.length).toFixed(1) : 0
             }
         });
-
     } catch (error) {
         console.error('❌ Error in getTeamAttendanceReport:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch team attendance report',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Failed to fetch team attendance report', error: error.message });
     }
 };
 
