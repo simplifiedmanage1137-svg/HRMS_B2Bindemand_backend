@@ -1394,7 +1394,11 @@ exports.getMissedClockOuts = async (req, res) => {
         const shiftTiming = parseShiftTiming(employee?.shift_timing);
         const expectedShiftHours = shiftTiming.totalHours || 9;
 
-        // ✅ FIX: Get ALL records where clock_out is NULL, regardless of date
+        // ✅ NEW: Regularization threshold set to 15 hours
+        const REGULARIZATION_THRESHOLD_HOURS = 15;
+        const REGULARIZATION_THRESHOLD_MINUTES = REGULARIZATION_THRESHOLD_HOURS * 60;
+
+        // Get ALL records where clock_out is NULL
         const { data: missedRecords, error } = await supabase
             .from('attendance')
             .select('*, employees!inner(first_name, last_name, shift_timing)')
@@ -1410,6 +1414,14 @@ exports.getMissedClockOuts = async (req, res) => {
         const nowMs = toUTCMs(nowISTStr);
         const todayISTDate = nowISTStr.split(' ')[0];
 
+        // ✅ Check if employee has any pending regularization request
+        const { data: pendingRegularization } = await supabase
+            .from('regularization_requests')
+            .select('id, attendance_date')
+            .eq('employee_id', employee_id)
+            .eq('status', 'pending')
+            .maybeSingle();
+
         for (const record of (missedRecords || [])) {
             const clockInValue = record.clock_in_ist || record.clock_in;
             const clockInMs = toUTCMs(clockInValue);
@@ -1419,9 +1431,7 @@ exports.getMissedClockOuts = async (req, res) => {
 
             const isToday = record.attendance_date === todayISTDate;
 
-            // ✅ FIX: canRegularize should be TRUE for any record with clock_out = NULL 
-            // that has completed expected hours, even if it's today or yesterday
-            // But exclude today's record if employee is currently working (has active session)
+            // ✅ UPDATED: canRegularize only if total hours >= 15
             let canRegularize = false;
 
             // Check if there's an active session for today
@@ -1436,10 +1446,10 @@ exports.getMissedClockOuts = async (req, res) => {
             if (isToday && activeSession) {
                 canRegularize = false;
             }
-            // If it's a past date OR (today but no active session) AND hours >= expected
+            // If it's a past date OR (today but no active session) AND hours >= 15
             else if (!record.is_regularized && !record.regularization_requested) {
-                // Check if total hours worked is at least expected shift hours
-                canRegularize = totalHours >= expectedShiftHours;
+                // ✅ Only allow regularization if total hours >= 15
+                canRegularize = totalMinutes >= REGULARIZATION_THRESHOLD_MINUTES;
             }
 
             // Format clock-in for display
@@ -1464,15 +1474,23 @@ exports.getMissedClockOuts = async (req, res) => {
                 regularization_requested: record.regularization_requested || false,
                 regularization_status: record.regularization_status || 'pending',
                 total_hours_worked: totalHours.toFixed(2),
+                total_minutes_worked: totalMinutes,
                 expected_hours: expectedShiftHours,
+                regularization_threshold: REGULARIZATION_THRESHOLD_HOURS,
                 can_regularize: canRegularize,
-                hours_needed: canRegularize ? 0 : (expectedShiftHours - totalHours).toFixed(2),
+                hours_needed: canRegularize ? 0 : (REGULARIZATION_THRESHOLD_HOURS - totalHours).toFixed(2),
                 has_clock_out: false,
-                is_today: isToday
+                is_today: isToday,
+                has_pending_regularization: !!pendingRegularization
             });
         }
 
-        res.json({ success: true, missed_clockouts: formattedRecords });
+        res.json({
+            success: true,
+            missed_clockouts: formattedRecords,
+            regularization_threshold: REGULARIZATION_THRESHOLD_HOURS,
+            has_pending_regularization: !!pendingRegularization
+        });
     } catch (error) {
         console.error('Error fetching missed clock-outs:', error);
         res.status(500).json({ success: false, message: 'Failed to fetch missed clock-outs', error: error.message });
