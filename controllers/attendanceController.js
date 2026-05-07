@@ -1382,9 +1382,10 @@ exports.getMissedClockOuts = async (req, res) => {
     try {
         const { employee_id } = req.params;
 
+        // Get employee's shift timing
         const { data: employee, error: empError } = await supabase
             .from('employees')
-            .select('shift_timing')
+            .select('shift_timing, id')
             .eq('employee_id', employee_id)
             .single();
 
@@ -1393,6 +1394,7 @@ exports.getMissedClockOuts = async (req, res) => {
         const shiftTiming = parseShiftTiming(employee?.shift_timing);
         const expectedShiftHours = shiftTiming.totalHours || 9;
 
+        // ✅ FIX: Get ALL records where clock_out is NULL, regardless of date
         const { data: missedRecords, error } = await supabase
             .from('attendance')
             .select('*, employees!inner(first_name, last_name, shift_timing)')
@@ -1416,8 +1418,31 @@ exports.getMissedClockOuts = async (req, res) => {
             const totalHours = totalMinutes / 60;
 
             const isToday = record.attendance_date === todayISTDate;
-            const canRegularize = !isToday && !record.is_regularized && !record.regularization_requested;
 
+            // ✅ FIX: canRegularize should be TRUE for any record with clock_out = NULL 
+            // that has completed expected hours, even if it's today or yesterday
+            // But exclude today's record if employee is currently working (has active session)
+            let canRegularize = false;
+
+            // Check if there's an active session for today
+            const { data: activeSession } = await supabase
+                .from('attendance_sessions')
+                .select('id')
+                .eq('employee_id', employee_id)
+                .eq('is_active', true)
+                .maybeSingle();
+
+            // If it's today's record and there's an active session, don't show regularization
+            if (isToday && activeSession) {
+                canRegularize = false;
+            }
+            // If it's a past date OR (today but no active session) AND hours >= expected
+            else if (!record.is_regularized && !record.regularization_requested) {
+                // Check if total hours worked is at least expected shift hours
+                canRegularize = totalHours >= expectedShiftHours;
+            }
+
+            // Format clock-in for display
             let clockInDisplay = clockInValue;
             if (clockInDisplay && typeof clockInDisplay === 'string' && clockInDisplay.includes(' ')) {
                 const timePart = clockInDisplay.split(' ')[1];
@@ -1442,7 +1467,8 @@ exports.getMissedClockOuts = async (req, res) => {
                 expected_hours: expectedShiftHours,
                 can_regularize: canRegularize,
                 hours_needed: canRegularize ? 0 : (expectedShiftHours - totalHours).toFixed(2),
-                has_clock_out: false
+                has_clock_out: false,
+                is_today: isToday
             });
         }
 
@@ -1992,7 +2018,7 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
         // ✅ CORRECTED: Removed duplicate 'late' declaration
         const formattedAttendance = (attendance || []).map(record => {
             const employee = record.employees || {};
-            
+
             // ✅ SINGLE declaration of 'late' with correct 5 parameters
             const late = recalculateLate(
                 record.clock_in_ist,
@@ -2001,7 +2027,7 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
                 employee.shift_timing,
                 record.attendance_date
             );
-            
+
             let totalHoursDisplay = '0h 0m';
             if (record.total_minutes) {
                 totalHoursDisplay = `${Math.floor(record.total_minutes / 60)}h ${Math.round(record.total_minutes % 60)}m`;
