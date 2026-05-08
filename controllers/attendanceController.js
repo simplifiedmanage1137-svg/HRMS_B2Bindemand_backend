@@ -1414,13 +1414,8 @@ exports.getMissedClockOuts = async (req, res) => {
         const nowMs = toUTCMs(nowISTStr);
         const todayISTDate = nowISTStr.split(' ')[0];
 
-        // ✅ Check if employee has any pending regularization request
-        const { data: pendingRegularization } = await supabase
-            .from('regularization_requests')
-            .select('id, attendance_date')
-            .eq('employee_id', employee_id)
-            .eq('status', 'pending')
-            .maybeSingle();
+        // ✅ REMOVED: No need to check pending regularization for blocking
+        // Just track if there's any pending request for display purposes only
 
         for (const record of (missedRecords || [])) {
             const clockInValue = record.clock_in_ist || record.clock_in;
@@ -1431,7 +1426,7 @@ exports.getMissedClockOuts = async (req, res) => {
 
             const isToday = record.attendance_date === todayISTDate;
 
-            // ✅ UPDATED: canRegularize only if total hours >= 15
+            // ✅ UPDATED: canRegularize only if total hours >= 15 AND it's NOT today's record
             let canRegularize = false;
 
             // Check if there's an active session for today
@@ -1442,13 +1437,12 @@ exports.getMissedClockOuts = async (req, res) => {
                 .eq('is_active', true)
                 .maybeSingle();
 
-            // If it's today's record and there's an active session, don't show regularization
+            // ✅ If it's today's record and there's an active session, don't show regularization
             if (isToday && activeSession) {
                 canRegularize = false;
             }
-            // If it's a past date OR (today but no active session) AND hours >= 15
-            else if (!record.is_regularized && !record.regularization_requested) {
-                // ✅ Only allow regularization if total hours >= 15
+            // ✅ If it's a past date AND hours >= 15, allow regularization
+            else if (!isToday && !record.is_regularized && !record.regularization_requested) {
                 canRegularize = totalMinutes >= REGULARIZATION_THRESHOLD_MINUTES;
             }
 
@@ -1480,16 +1474,14 @@ exports.getMissedClockOuts = async (req, res) => {
                 can_regularize: canRegularize,
                 hours_needed: canRegularize ? 0 : (REGULARIZATION_THRESHOLD_HOURS - totalHours).toFixed(2),
                 has_clock_out: false,
-                is_today: isToday,
-                has_pending_regularization: !!pendingRegularization
+                is_today: isToday
             });
         }
 
         res.json({
             success: true,
             missed_clockouts: formattedRecords,
-            regularization_threshold: REGULARIZATION_THRESHOLD_HOURS,
-            has_pending_regularization: !!pendingRegularization
+            regularization_threshold: REGULARIZATION_THRESHOLD_HOURS
         });
     } catch (error) {
         console.error('Error fetching missed clock-outs:', error);
