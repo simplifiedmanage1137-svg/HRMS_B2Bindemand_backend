@@ -3,9 +3,8 @@ const express = require('express');
 const router = express.Router();
 const ratingController = require('../controllers/ratingController');
 
-// ✅ No special middleware - let the controller handle authorization
 module.exports = (authenticateToken, requireAdmin) => {
-    // Team Leader/Manager routes (authorization handled in controller)
+    // Manager routes
     router.get('/team', authenticateToken, ratingController.getTeamForRating);
     router.post('/submit', authenticateToken, ratingController.submitRating);
     

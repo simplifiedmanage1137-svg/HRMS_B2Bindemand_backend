@@ -197,10 +197,9 @@ const calculateAttendanceSummary = (attendanceRecords, leaves, startDateStr, end
             const expectedMinutes = 9 * 60;
 
             if (hasClockIn && hasClockOut) {
-                const cappedMinutes = totalMinutes > 20 * 60 ? 9 * 60 : totalMinutes;
-                if (cappedMinutes >= expectedMinutes) {
+                if (totalMinutes >= expectedMinutes) {
                     presentDays++;
-                } else if (cappedMinutes >= 300) {
+                } else if (totalMinutes >= 300) {
                     halfDays++;
                 } else {
                     absentDays++;
@@ -211,7 +210,7 @@ const calculateAttendanceSummary = (attendanceRecords, leaves, startDateStr, end
                 absentDays++;
             }
 
-            if (attendance.overtime_hours > 0 && totalMinutes <= 20 * 60) {
+            if (attendance.overtime_hours > 0) {
                 totalOvertimeHours += attendance.overtime_hours || 0;
                 totalOvertimeAmount += attendance.overtime_amount || 0;
             }
@@ -240,14 +239,12 @@ const calculateAttendanceSummary = (attendanceRecords, leaves, startDateStr, end
     };
 };
 
-// In your salaryController.js, update the generateSalarySlip function
-
-// Simplified generateSalarySlip function with in-hand salary calculation
+// Simplified generateSalarySlip function
 exports.generateSalarySlip = async (req, res) => {
     try {
         console.log('📝 Generating salary slip with body:', req.body);
 
-        const { employee_id, month, year, overtime_amount, overtime_hours } = req.body;
+        const { employee_id, month, year } = req.body;
 
         if (!employee_id || !month || !year) {
             return res.status(400).json({ success: false, message: 'Employee ID, month, and year are required' });
@@ -269,12 +266,7 @@ exports.generateSalarySlip = async (req, res) => {
             return res.json({ success: true, message: 'Salary slip already exists', salarySlip: existingSlip });
         }
 
-        // Get monthly salary (gross salary)
         const monthlySalary = parseFloat(employee.gross_salary || employee.salary || 0);
-        
-        // ✅ FIX: Calculate in-hand salary (Gross - 200 DT deduction)
-        const inHandSalary = monthlySalary - 200;
-        
         const joiningDate   = employee.joining_date ? new Date(employee.joining_date) : null;
 
         // ── 1. Total working days in cycle (Mon–Fri), respecting joining date ──
@@ -303,37 +295,14 @@ exports.generateSalarySlip = async (req, res) => {
         const basicSalary = parseFloat(Math.max(0, monthlySalary - unpaidDeduction).toFixed(2));
 
         // OT from attendance records (use passed value or sum from records)
-        const finalOvertimeHours  = parseFloat((overtime_hours  || summary.totalOvertimeHours  || 0).toFixed(2));
-        const finalOvertimeAmount = parseFloat((overtime_amount || summary.totalOvertimeAmount || 0).toFixed(2));
+        const overtimeHours  = parseFloat((req.body.overtime_hours  || summary.totalOvertimeHours  || 0).toFixed(2));
+        const overtimeAmount = parseFloat((req.body.overtime_amount || summary.totalOvertimeAmount || 0).toFixed(2));
 
         // Fixed DT deduction
         const dtDeduction = 200;
 
-        // ✅ Calculate in-hand salary after all calculations
-        let calculatedInHandSalary = basicSalary + finalOvertimeAmount - dtDeduction;
-        calculatedInHandSalary = parseFloat(Math.max(0, calculatedInHandSalary).toFixed(2));
-
-        // Net salary is the same as in-hand salary
-        const netSalary = calculatedInHandSalary;
-
-        console.log('📊 Salary Calculation Details:', {
-            monthlySalary,
-            inHandSalary: inHandSalary.toFixed(2),
-            totalWorkingDays,
-            perDaySalary: perDaySalary.toFixed(2),
-            presentDays: summary.presentDays,
-            halfDays: summary.halfDays,
-            absentDays: summary.absentDays,
-            unpaidLeaveDays: summary.unpaidLeaveDays,
-            deductibleDays,
-            unpaidDeduction: unpaidDeduction.toFixed(2),
-            basicSalary: basicSalary.toFixed(2),
-            overtimeHours: finalOvertimeHours,
-            overtimeAmount: finalOvertimeAmount.toFixed(2),
-            dtDeduction,
-            calculatedInHandSalary: calculatedInHandSalary.toFixed(2),
-            netSalary: netSalary.toFixed(2)
-        });
+        // Net salary
+        const netSalary = parseFloat(Math.max(0, basicSalary + overtimeAmount - dtDeduction).toFixed(2));
 
         const salaryData = {
             employee_id,
@@ -351,17 +320,21 @@ exports.generateSalarySlip = async (req, res) => {
             unpaid_leave_days:  summary.unpaidLeaveDays,
             unpaid_deduction:   unpaidDeduction,
             basic_salary:       basicSalary,
-            in_hand_salary:     calculatedInHandSalary,  // ✅ Added in-hand salary
-            overtime_hours:     finalOvertimeHours,
-            overtime_amount:    finalOvertimeAmount,
-            dt_deduction:       dtDeduction,
+            overtime_hours:     overtimeHours,
+            overtime_amount:    overtimeAmount,
+            dt:                 dtDeduction,
             net_salary:         netSalary,
             generated_date:     new Date().toISOString(),
-            is_paid:            false,
-            created_at:         new Date().toISOString()
+            is_paid:            false
         };
 
-        console.log('📝 Inserting salary slip:', salaryData);
+        console.log('📝 Salary calculation:', {
+            monthlySalary, totalWorkingDays, perDaySalary: perDaySalary.toFixed(2),
+            presentDays: summary.presentDays, halfDays: summary.halfDays,
+            absentDays: summary.absentDays, unpaidLeaveDays: summary.unpaidLeaveDays,
+            deductibleDays, unpaidDeduction, basicSalary,
+            overtimeHours, overtimeAmount, dtDeduction, netSalary
+        });
 
         const { data: salarySlip, error: insertError } = await supabase
             .from('salary_slips').insert([salaryData]).select().single();
@@ -378,7 +351,6 @@ exports.generateSalarySlip = async (req, res) => {
         res.status(500).json({ success: false, message: 'Failed to generate salary slip', error: error.message });
     }
 };
-
 // Get salary slips for employee
 exports.getEmployeeSalarySlips = async (req, res) => {
     try {

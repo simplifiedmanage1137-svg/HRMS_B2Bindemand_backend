@@ -35,54 +35,33 @@ const getTeamEmployeeIdsByManagerName = async (managerName) => {
         .map(emp => emp.employee_id);
 };
 
-
+// ✅ UPDATED: Get team members for rating (for managers)
 const getTeamForRating = async (req, res) => {
     try {
         const managerEmployeeId = req.user?.employeeId;
         const userRole = req.user?.role;
 
-        console.log('=== getTeamForRating DEBUG ===');
-        console.log('User ID:', managerEmployeeId);
-        console.log('User Role:', userRole);
-
         if (!managerEmployeeId) {
             return res.status(401).json({ success: false, message: 'Unauthorized' });
         }
 
-        // ✅ FIX: Use the same logic as team attendance/shifts tabs
-        // Get employee details (like other tabs do)
-        const { data: manager, error: managerError } = await supabase
-            .from('employees')
-            .select('employee_id, first_name, last_name, reporting_manager, designation, role')
-            .eq('employee_id', managerEmployeeId)
-            .single();
+        // Only managers can access this endpoint
+        if (userRole !== 'manager' && userRole !== 'admin') {
+            return res.status(403).json({ success: false, message: 'Only managers can rate team members' });
+        }
 
-        if (managerError || !manager) {
-            console.error('Error fetching manager:', managerError);
+        // Get manager details
+        const manager = await getEmployeeById(managerEmployeeId);
+        if (!manager) {
             return res.status(404).json({ success: false, message: 'User not found' });
         }
 
         const managerName = `${manager.first_name || ''} ${manager.last_name || ''}`.trim().toLowerCase();
 
-        console.log(`Checking team members for: ${managerName}`);
+        // Get all team members (employees reporting to this manager)
+        const teamEmployeeIds = await getTeamEmployeeIdsByManagerName(managerName);
 
-        // ✅ Get team members based on reporting_manager (same logic as other tabs)
-        const { data: teamMembers, error: teamError } = await supabase
-            .from('employees')
-            .select('employee_id, first_name, last_name, department, designation, joining_date, reporting_manager')
-            .ilike('reporting_manager', `%${managerName}%`)
-            .neq('employee_id', managerEmployeeId)
-            .order('first_name', { ascending: true });
-
-        if (teamError) {
-            console.error('Error fetching team members:', teamError);
-            throw teamError;
-        }
-
-        console.log(`Found ${teamMembers?.length || 0} team members`);
-
-        // ✅ If no team members, still return success (like other tabs)
-        if (!teamMembers || teamMembers.length === 0) {
+        if (teamEmployeeIds.length === 0) {
             return res.json({
                 success: true,
                 team_members: [],
@@ -93,22 +72,34 @@ const getTeamForRating = async (req, res) => {
             });
         }
 
+        // Get team member details
+        const { data: teamMembers, error: teamError } = await supabase
+            .from('employees')
+            .select('employee_id, first_name, last_name, department, designation, joining_date')
+            .in('employee_id', teamEmployeeIds)
+            .order('first_name', { ascending: true });
+
+        if (teamError) throw teamError;
+
         // Get current month and year
         const now = new Date();
         const currentMonth = now.getMonth() + 1;
         const currentYear = now.getFullYear();
 
-        // Get existing ratings for current month
-        const employeeIds = teamMembers.map(m => m.employee_id);
-        const { data: existingRatings, error: ratingError } = await supabase
-            .from('employee_ratings')
-            .select('*')
-            .in('employee_id', employeeIds)
-            .eq('rating_month', currentMonth)
-            .eq('rating_year', currentYear);
+        // Get existing ratings for current month (only from managers, not admin)
+        let existingRatings = [];
+        if (teamMembers && teamMembers.length > 0) {
+            const { data: ratings, error: ratingError } = await supabase
+                .from('employee_ratings')
+                .select('*')
+                .in('employee_id', teamMembers.map(m => m.employee_id))
+                .eq('rating_month', currentMonth)
+                .eq('rating_year', currentYear)
+                .eq('rated_by_role', 'manager'); // Only show manager ratings
 
-        if (ratingError) {
-            console.error('Error fetching ratings:', ratingError);
+            if (!ratingError) {
+                existingRatings = ratings || [];
+            }
         }
 
         // Combine team members with their ratings
@@ -136,6 +127,8 @@ const getTeamForRating = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+// ✅ UPDATED: Submit rating (supports both manager and admin)
 const submitRating = async (req, res) => {
     try {
         const { employee_id, rating, comments, rating_month, rating_year } = req.body;
@@ -150,46 +143,31 @@ const submitRating = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Valid rating (1-5) is required' });
         }
 
-        // ✅ Get rater details
-        const { data: rater, error: raterError } = await supabase
-            .from('employees')
-            .select('first_name, last_name, reporting_manager')
-            .eq('employee_id', raterId)
-            .single();
+        const ratedByRole = userRole === 'admin' ? 'admin' : 'manager';
 
-        if (raterError || !rater) {
-            return res.status(404).json({ success: false, message: 'Rater not found' });
+        // For managers: Verify the employee is in their team
+        if (userRole === 'manager') {
+            const manager = await getEmployeeById(raterId);
+            if (!manager) {
+                return res.status(404).json({ success: false, message: 'Manager not found' });
+            }
+
+            const managerName = `${manager.first_name || ''} ${manager.last_name || ''}`.trim().toLowerCase();
+            const teamEmployeeIds = await getTeamEmployeeIdsByManagerName(managerName);
+
+            if (!teamEmployeeIds.includes(employee_id)) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'You can only rate your own team members'
+                });
+            }
         }
-
-        const raterName = `${rater.first_name || ''} ${rater.last_name || ''}`.trim().toLowerCase();
-
-        // ✅ Check if employee reports to this rater (same logic as other tabs)
-        const { data: employee, error: empError } = await supabase
-            .from('employees')
-            .select('reporting_manager')
-            .eq('employee_id', employee_id)
-            .single();
-
-        if (empError || !employee) {
-            return res.status(404).json({ success: false, message: 'Employee not found' });
-        }
-
-        const reportingManager = (employee.reporting_manager || '').trim().toLowerCase();
-
-        // ✅ Allow if user is admin OR is the reporting manager
-        if (userRole !== 'admin' && reportingManager !== raterName) {
-            return res.status(403).json({
-                success: false,
-                message: 'You can only rate your own team members'
-            });
-        }
+        // For admins: Can rate any employee (no restriction)
 
         const month = rating_month || new Date().getMonth() + 1;
         const year = rating_year || new Date().getFullYear();
 
-        const ratedByRole = userRole === 'admin' ? 'admin' : 'manager';
-
-        // Check if rating already exists
+        // Check if rating already exists from this rater for this month/year
         const { data: existingRating, error: checkError } = await supabase
             .from('employee_ratings')
             .select('id')
@@ -202,6 +180,7 @@ const submitRating = async (req, res) => {
         let result;
 
         if (existingRating) {
+            // Update existing rating
             const { data, error } = await supabase
                 .from('employee_ratings')
                 .update({
@@ -215,6 +194,7 @@ const submitRating = async (req, res) => {
             if (error) throw error;
             result = data;
         } else {
+            // Insert new rating
             const { data, error } = await supabase
                 .from('employee_ratings')
                 .insert([{
