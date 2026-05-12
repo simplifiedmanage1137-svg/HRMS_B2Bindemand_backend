@@ -307,6 +307,29 @@ const recalculateLate = (clockInIst, clockIn, shiftTiming, attendanceDate) => {
     };
 };
 
+// Get effective shift timing for an employee on a given date from history
+const getEffectiveShiftTiming = async (employeeId, attendanceDate, fallbackShift) => {
+    // If shift_time_used was saved at clock-in time, always use it.
+    // This prevents a shift change made AFTER clock-in from altering that day's late calculation.
+    if (fallbackShift) return fallbackShift;
+    try {
+        const { data } = await supabase
+            .from('employee_shift_history')
+            .select('shift_timing, effective_from')
+            .eq('employee_id', employeeId)
+            .lte('effective_from', attendanceDate)
+            .order('effective_from', { ascending: false })
+            .limit(1);
+        if (data && data.length > 0) return data[0].shift_timing;
+    } catch (_) {}
+    // Last resort: current shift from employees table
+    try {
+        const { data } = await supabase.from('employees').select('shift_timing').eq('employee_id', employeeId).single();
+        if (data) return data.shift_timing;
+    } catch (_) {}
+    return '9:00 AM - 6:00 PM';
+};
+
 // Format late time for display
 const formatLateTime = (lateMinutes) => {
     if (!lateMinutes || lateMinutes <= 0) return null;
@@ -1283,7 +1306,7 @@ exports.getAttendanceReport = async (req, res) => {
             }
         });
 
-        const formattedAttendance = (Object.values(dedupedAttendanceMap) || []).map(record => {
+        const formattedAttendance = await Promise.all((Object.values(dedupedAttendanceMap) || []).map(async record => {
             const employee = record.employees || {};
             let totalHoursDisplay = '0h 0m';
             if (record.total_minutes) {
@@ -1293,8 +1316,8 @@ exports.getAttendanceReport = async (req, res) => {
                 totalHoursDisplay = `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`;
             }
 
-            // Always recalculate late from clock_in_ist + shift_timing (fixes DB inconsistency)
-            const shiftTiming = employee.shift_timing || record.shift_time_used;
+            // Use shift history - new shift wont affect old records
+            const shiftTiming = await getEffectiveShiftTiming(record.employee_id, record.attendance_date, record.shift_time_used || employee.shift_timing);
             const late = recalculateLate(record.clock_in_ist, record.clock_in, shiftTiming, record.attendance_date);
 
             let status = record.status;
@@ -1317,8 +1340,7 @@ exports.getAttendanceReport = async (req, res) => {
                 late_minutes: late.late_minutes,
                 late_display: late.late_display,
                 early_minutes: record.early_minutes,
-                // Use current employee shift_timing (updated), fallback to shift_time_used (at clock-in)
-                shift_time_used: employee.shift_timing || record.shift_time_used,
+                shift_time_used: shiftTiming,
                 is_holiday: record.is_holiday,
                 holiday_name: record.holiday_name,
                 comp_off_awarded: record.comp_off_awarded,
@@ -1328,7 +1350,7 @@ exports.getAttendanceReport = async (req, res) => {
                 last_name: employee.last_name || '',
                 department: employee.department || ''
             };
-        });
+        }));
 
         let totalWorkingMinutes = 0;
         formattedAttendance.forEach(a => {
@@ -2042,7 +2064,7 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
             .lte('attendance_date', end)
             .order('attendance_date', { ascending: false });
 
-        const formattedAttendance = (attendance || []).map(record => {
+        const formattedAttendance = await Promise.all((attendance || []).map(async record => {
             const employee = record.employees || {};
             let totalHoursDisplay = '0h 0m';
             if (record.total_minutes) {
@@ -2052,8 +2074,8 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
                 totalHoursDisplay = `${Math.floor(totalMinutes / 60)}h ${Math.round(totalMinutes % 60)}m`;
             }
 
-            // Always recalculate late from clock_in_ist + shift_timing (fixes DB inconsistency)
-            const shiftTiming = employee.shift_timing || record.shift_time_used;
+            // Use shift history - new shift wont affect old records
+            const shiftTiming = await getEffectiveShiftTiming(record.employee_id, record.attendance_date, record.shift_time_used || employee.shift_timing);
             const late = recalculateLate(record.clock_in_ist, record.clock_in, shiftTiming, record.attendance_date);
 
             let status = record.status;
@@ -2083,7 +2105,7 @@ exports.getEmployeeAttendanceReport = async (req, res) => {
                 last_name: employee.last_name || '',
                 department: employee.department || ''
             };
-        });
+        }));
 
         let totalWorkingMinutes = 0;
         formattedAttendance.forEach(a => {
@@ -2734,9 +2756,9 @@ exports.getTeamAttendanceReport = async (req, res) => {
                     employeeStats[emp.employee_id].total_absent++;
                 }
 
-                // Rest of the code remains the same...
-                // Daily stats for today
-                if (date === todayStr) {
+                // Daily stats for selected date (daily view) or today (monthly view)
+                const statsDate = view_type === 'daily' ? startDate : todayStr;
+                if (date === statsDate) {
                     if (!dailyStats[date]) {
                         dailyStats[date] = {
                             total_employees: targetEmployees.length,
@@ -2803,8 +2825,9 @@ exports.getTeamAttendanceReport = async (req, res) => {
             };
         });
 
-        // Calculate team summary for today
-        const todayStats = dailyStats[todayStr] || {
+        // Calculate team summary for selected date (daily) or today (monthly)
+        const statsLookupDate = view_type === 'daily' ? startDate : todayStr;
+        const todayStats = dailyStats[statsLookupDate] || {
             total_employees: targetEmployees.length,
             present: 0,
             absent: 0,

@@ -175,6 +175,8 @@ router.put('/manager/shift/:employee_id', verifyToken, async (req, res) => {
             return res.status(403).json({ success: false, message: 'You can only update shift for employees who report to you' });
         }
 
+        const effectiveFrom = new Date().toISOString().split('T')[0];
+
         const { data, error } = await supabase
             .from('employees')
             .update({ shift_timing: shift_timing.trim(), updated_at: new Date().toISOString() })
@@ -182,6 +184,13 @@ router.put('/manager/shift/:employee_id', verifyToken, async (req, res) => {
             .select('employee_id, first_name, last_name, shift_timing');
 
         if (error) throw error;
+
+        await supabase.from('employee_shift_history').insert([{
+            employee_id,
+            shift_timing: shift_timing.trim(),
+            effective_from: effectiveFrom
+        }]);
+
         res.json({ success: true, message: `Shift updated for ${emp.first_name} ${emp.last_name}`, employee: data[0] });
     } catch (error) {
         console.error('Error updating shift:', error);
@@ -411,6 +420,7 @@ router.put('/:id', verifyToken, isAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         const updates = req.body;
+        const newShiftTiming = updates.shift_timing;
 
         // Remove fields that shouldn't be updated
         delete updates.id;
@@ -433,6 +443,16 @@ router.put('/:id', verifyToken, isAdmin, async (req, res) => {
                 success: false,
                 message: 'Employee not found'
             });
+        }
+
+        // If shift_timing was updated, save to history
+        if (newShiftTiming) {
+            const effectiveFrom = new Date().toISOString().split('T')[0];
+            await supabase.from('employee_shift_history').insert([{
+                employee_id: data[0].employee_id,
+                shift_timing: newShiftTiming.trim(),
+                effective_from: effectiveFrom
+            }]);
         }
 
         res.json({
