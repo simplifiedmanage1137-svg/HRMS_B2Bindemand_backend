@@ -321,12 +321,12 @@ const getEffectiveShiftTiming = async (employeeId, attendanceDate, fallbackShift
             .order('effective_from', { ascending: false })
             .limit(1);
         if (data && data.length > 0) return data[0].shift_timing;
-    } catch (_) {}
+    } catch (_) { }
     // Last resort: current shift from employees table
     try {
         const { data } = await supabase.from('employees').select('shift_timing').eq('employee_id', employeeId).single();
         if (data) return data.shift_timing;
-    } catch (_) {}
+    } catch (_) { }
     return '9:00 AM - 6:00 PM';
 };
 
@@ -1386,7 +1386,8 @@ exports.getAttendanceReport = async (req, res) => {
     }
 };
 
-// Get missed clock-outs with hours calculation
+// In attendanceController.js - Replace getMissedClockOuts function
+
 exports.getMissedClockOuts = async (req, res) => {
     try {
         const { employee_id } = req.params;
@@ -1403,7 +1404,7 @@ exports.getMissedClockOuts = async (req, res) => {
         const shiftTiming = parseShiftTiming(employee?.shift_timing);
         const expectedShiftHours = shiftTiming.totalHours || 9;
 
-        // Get records where clock_out IS NULL (missed clock-outs)
+        // ✅ FIX: Get records where clock_out IS NULL
         const { data: missedRecords, error } = await supabase
             .from('attendance')
             .select('*, employees!inner(first_name, last_name, shift_timing)')
@@ -1419,6 +1420,14 @@ exports.getMissedClockOuts = async (req, res) => {
         const nowMs = toUTCMs(nowISTStr);
         const todayISTDate = nowISTStr.split(' ')[0];
 
+        // ✅ Check for active session
+        const { data: activeSession } = await supabase
+            .from('attendance_sessions')
+            .select('id, session_id')
+            .eq('employee_id', employee_id)
+            .eq('is_active', true)
+            .maybeSingle();
+
         for (const record of (missedRecords || [])) {
             const clockInValue = record.clock_in_ist || record.clock_in;
             const clockInMs = toUTCMs(clockInValue);
@@ -1426,24 +1435,18 @@ exports.getMissedClockOuts = async (req, res) => {
             if (totalMinutes < 0) totalMinutes += 24 * 60;
             const totalHours = totalMinutes / 60;
 
-        const recordDate = record.attendance_date.split('T')[0];
+            const recordDate = record.attendance_date.split('T')[0];
             const isToday = recordDate === todayISTDate;
             const isRejected = record.regularization_status === 'rejected';
 
-            // Check if there's an active session for this record (employee still working)
-            const { data: activeSessions } = await supabase
-                .from('attendance_sessions')
-                .select('id')
-                .eq('employee_id', employee_id)
-                .eq('session_id', record.session_id)
-                .eq('is_active', true)
-                .limit(1);
-            const hasActiveSession = activeSessions && activeSessions.length > 0;
+            // ✅ CRITICAL: canRegularize only for PAST dates (not today) with active session NOT running
+            let canRegularize = false;
 
-            // Can regularize only if: not today, not already regularized,
-            // no active session still running, and not pending request
-            const canRegularize = !isToday && !record.is_regularized && !hasActiveSession &&
-                (!record.regularization_requested || isRejected);
+            if (!isToday && !record.is_regularized) {
+                // Past date - can regularize if not already requested or was rejected
+                canRegularize = (!record.regularization_requested || isRejected);
+            }
+            // For today's record, DO NOT show regularization - show Clock Out button instead
 
             // Format clock-in for display
             let clockInDisplay = clockInValue;
@@ -1470,13 +1473,16 @@ exports.getMissedClockOuts = async (req, res) => {
                 expected_hours: expectedShiftHours,
                 can_regularize: canRegularize,
                 hours_needed: canRegularize ? 0 : (expectedShiftHours - totalHours).toFixed(2),
-                has_clock_out: false
+                has_clock_out: false,
+                is_today: isToday,
+                has_active_session: !!activeSession
             });
         }
 
         res.json({
             success: true,
-            missed_clockouts: formattedRecords
+            missed_clockouts: formattedRecords,
+            has_active_session: !!activeSession
         });
 
     } catch (error) {
