@@ -1418,7 +1418,7 @@ exports.getMissedClockOuts = async (req, res) => {
             const totalHours = totalMinutes / 60;
 
             const isToday = record.attendance_date === todayISTDate;
-            const canRegularize = !isToday && !record.is_regularized && !record.regularization_requested;
+            const canRegularize = !isToday && !record.is_regularized && !record.regularization_requested && totalHours >= 15;
 
             // Format clock-in for display
             let clockInDisplay = clockInValue;
@@ -1614,13 +1614,7 @@ exports.approveRegularization = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Approved clock out time is required' });
         }
 
-        // ADMIN CANNOT APPROVE
-        if (userRole === 'admin') {
-            return res.status(403).json({
-                success: false,
-                message: '❌ Admin cannot approve regularization requests. Only reporting managers can approve/reject requests from their team members.'
-            });
-        }
+
 
         // Get the regularization request
         const { data: request, error: fetchError } = await supabase
@@ -1637,22 +1631,24 @@ exports.approveRegularization = async (req, res) => {
             return res.status(400).json({ success: false, message: `Request already ${request.status}` });
         }
 
-        // Check if user is the reporting manager
-        const requestEmployee = await getEmployeeById(request.employee_id);
-        const approver = await getEmployeeById(approver_id);
+        // Check if user is the reporting manager (skip for admin)
+        if (userRole !== 'admin') {
+            const requestEmployee = await getEmployeeById(request.employee_id);
+            const approver = await getEmployeeById(approver_id);
 
-        if (!requestEmployee || !approver) {
-            return res.status(404).json({ success: false, message: 'User details not found' });
-        }
+            if (!requestEmployee || !approver) {
+                return res.status(404).json({ success: false, message: 'User details not found' });
+            }
 
-        const requestEmployeeReportingManager = (requestEmployee.reporting_manager || '').trim().toLowerCase();
-        const approverName = `${approver.first_name || ''} ${approver.last_name || ''}`.trim().toLowerCase();
+            const requestEmployeeReportingManager = (requestEmployee.reporting_manager || '').trim().toLowerCase();
+            const approverName = `${approver.first_name || ''} ${approver.last_name || ''}`.trim().toLowerCase();
 
-        if (requestEmployeeReportingManager !== approverName) {
-            return res.status(403).json({
-                success: false,
-                message: '❌ Only the reporting manager can approve regularization requests for their team members.'
-            });
+            if (requestEmployeeReportingManager !== approverName) {
+                return res.status(403).json({
+                    success: false,
+                    message: '❌ Only the reporting manager can approve regularization requests for their team members.'
+                });
+            }
         }
 
         // Parse times
@@ -1838,14 +1834,7 @@ exports.rejectRegularization = async (req, res) => {
             });
         }
 
-        // ADMIN CANNOT REJECT - Check first
-        if (userRole === 'admin') {
-            console.log('🚫 Admin attempted to reject regularization request');
-            return res.status(403).json({
-                success: false,
-                message: '❌ Admin cannot reject regularization requests. Only reporting managers can approve/reject requests from their team members.'
-            });
-        }
+
 
         // Get the regularization request
         const { data: request, error: fetchError } = await supabase
@@ -1868,24 +1857,25 @@ exports.rejectRegularization = async (req, res) => {
             });
         }
 
-        // Check if user is the reporting manager of the request employee
-        const requestEmployee = await getEmployeeById(request.employee_id);
-        const approver = await getEmployeeById(approver_id);
+        // Check if user is the reporting manager (skip for admin)
+        if (userRole !== 'admin') {
+            const requestEmployee = await getEmployeeById(request.employee_id);
+            const approver = await getEmployeeById(approver_id);
 
-        if (!requestEmployee || !approver) {
-            return res.status(404).json({ success: false, message: 'User details not found' });
-        }
+            if (!requestEmployee || !approver) {
+                return res.status(404).json({ success: false, message: 'User details not found' });
+            }
 
-        const requestEmployeeReportingManager = (requestEmployee.reporting_manager || '').trim().toLowerCase();
-        const approverName = `${approver.first_name || ''} ${approver.last_name || ''}`.trim().toLowerCase();
+            const requestEmployeeReportingManager = (requestEmployee.reporting_manager || '').trim().toLowerCase();
+            const approverName = `${approver.first_name || ''} ${approver.last_name || ''}`.trim().toLowerCase();
 
-        // Only reporting manager can reject
-        if (requestEmployeeReportingManager !== approverName) {
-            console.log(`🚫 ${approverName} is not the reporting manager for ${request.employee_id}`);
-            return res.status(403).json({
-                success: false,
-                message: '❌ Only the reporting manager can reject regularization requests for their team members.'
-            });
+            if (requestEmployeeReportingManager !== approverName) {
+                console.log(`🚫 ${approverName} is not the reporting manager for ${request.employee_id}`);
+                return res.status(403).json({
+                    success: false,
+                    message: '❌ Only the reporting manager can reject regularization requests for their team members.'
+                });
+            }
         }
 
         // Update the regularization request status
@@ -1981,16 +1971,16 @@ exports.getPendingRegularizations = async (req, res) => {
             // Determine if user can act on this request (approve/reject)
             let can_act = false;
 
-            if (!isAdmin) {
+            if (isAdmin) {
+                can_act = request.status === 'pending';
+            } else {
                 // Only reporting managers can act on their team's requests
                 const requestEmployeeReportingManager = (employee?.reporting_manager || '').trim().toLowerCase();
                 const approver = await getEmployeeById(userEmployeeId);
                 const approverName = `${approver?.first_name || ''} ${approver?.last_name || ''}`.trim().toLowerCase();
 
-                // User can act if they are the reporting manager AND request is pending
                 can_act = requestEmployeeReportingManager === approverName && request.status === 'pending';
             }
-            // Admin cannot act on any request
 
             // In getPendingRegularizations function, ensure the attendance_id is correct
             formattedRequests.push({
