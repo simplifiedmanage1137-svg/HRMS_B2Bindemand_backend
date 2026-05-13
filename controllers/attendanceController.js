@@ -1420,7 +1420,11 @@ exports.getMissedClockOuts = async (req, res) => {
             const totalHours = totalMinutes / 60;
 
             const isToday = record.attendance_date === todayISTDate;
-            const canRegularize = !isToday && !record.is_regularized && !record.regularization_requested && totalHours >= 15;
+            const isRejected = record.regularization_status === 'rejected';
+            // Allow regularization if: not today, not already regularized, and either
+            // previous request was rejected OR enough hours worked (>= expected shift hours)
+            const canRegularize = !isToday && !record.is_regularized &&
+                (!record.regularization_requested || isRejected);
 
             // Format clock-in for display
             let clockInDisplay = clockInValue;
@@ -1442,7 +1446,7 @@ exports.getMissedClockOuts = async (req, res) => {
                 employee_name: `${record.employees?.first_name} ${record.employees?.last_name}`,
                 is_regularized: record.is_regularized || false,
                 regularization_requested: record.regularization_requested || false,
-                regularization_status: record.regularization_status || 'pending',
+                regularization_status: record.regularization_status || null,
                 total_hours_worked: totalHours.toFixed(2),
                 expected_hours: expectedShiftHours,
                 can_regularize: canRegularize,
@@ -1519,7 +1523,7 @@ exports.requestRegularization = async (req, res) => {
             });
         }
 
-        if (attendance.regularization_requested) {
+        if (attendance.regularization_requested && attendance.regularization_status !== 'rejected') {
             return res.status(400).json({
                 success: false,
                 message: 'Regularization already requested for this record'
@@ -1891,6 +1895,17 @@ exports.rejectRegularization = async (req, res) => {
             .eq('id', id);
 
         if (requestUpdateError) throw requestUpdateError;
+
+        // Reset attendance record so employee can re-submit
+        await supabase
+            .from('attendance')
+            .update({
+                regularization_requested: false,
+                regularization_status: 'rejected',
+                regularization_request_id: null
+            })
+            .eq('employee_id', request.employee_id)
+            .eq('attendance_date', request.attendance_date);
 
         console.log('✅ Regularization rejected successfully by reporting manager');
 
