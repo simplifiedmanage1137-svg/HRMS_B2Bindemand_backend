@@ -32,26 +32,22 @@ const getCycleDates = (month, year) => {
 // Calculate working days in cycle (Monday to Friday only)
 const calculateWorkingDaysInCycle = (startDate, endDate, joiningDate = null) => {
     let workingDays = 0;
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    const joinDate = joiningDate ? new Date(joiningDate) : null;
+    const start    = new Date(`${startDate.toISOString().split('T')[0]}T00:00:00`);
+    const end      = new Date(`${endDate.toISOString().split('T')[0]}T00:00:00`);
+    const joinDate = joiningDate
+        ? new Date(joiningDate.toISOString().split('T')[0] + 'T00:00:00')
+        : null;
 
-    let currentDate = new Date(start);
-
+    const currentDate = new Date(start);
     while (currentDate <= end) {
         const dayOfWeek = currentDate.getDay();
-        const isWeekday = dayOfWeek !== 0 && dayOfWeek !== 6;
-
-        if (isWeekday) {
-            if (joinDate && currentDate < joinDate) {
-                // Skip days before joining
-            } else {
+        if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+            if (!joinDate || currentDate >= joinDate) {
                 workingDays++;
             }
         }
         currentDate.setDate(currentDate.getDate() + 1);
     }
-
     return workingDays;
 };
 
@@ -92,17 +88,42 @@ const getEmployeeDetails = async (employeeId) => {
     return employee;
 };
 
-// Get attendance records for the cycle
+// Get attendance records for the cycle - best record per day
 const getAttendanceRecords = async (employeeId, startDateStr, endDateStr) => {
     const { data: attendance, error } = await supabase
         .from('attendance')
         .select('attendance_date, clock_in, clock_out, status, total_minutes, late_minutes, overtime_hours, overtime_amount')
         .eq('employee_id', employeeId)
         .gte('attendance_date', startDateStr)
-        .lte('attendance_date', endDateStr);
+        .lte('attendance_date', endDateStr)
+        .order('attendance_date', { ascending: true })
+        .order('total_minutes', { ascending: false, nullsFirst: false });
 
     if (error) throw error;
-    return attendance || [];
+
+    // Keep best record per day: prefer clocked-out > clocked-in > absent
+    const bestPerDay = {};
+    for (const rec of (attendance || [])) {
+        const dateKey = rec.attendance_date.split('T')[0];
+        const existing = bestPerDay[dateKey];
+        if (!existing) {
+            bestPerDay[dateKey] = rec;
+            continue;
+        }
+        // Prefer record with clock_out over one without
+        const existingHasOut = !!existing.clock_out;
+        const recHasOut = !!rec.clock_out;
+        if (!existingHasOut && recHasOut) {
+            bestPerDay[dateKey] = rec;
+        } else if (existingHasOut && recHasOut) {
+            // Both have clock_out — keep the one with more minutes
+            if ((rec.total_minutes || 0) > (existing.total_minutes || 0)) {
+                bestPerDay[dateKey] = rec;
+            }
+        }
+    }
+
+    return Object.values(bestPerDay);
 };
 
 // Get approved leaves for the cycle
@@ -121,21 +142,31 @@ const getApprovedLeaves = async (employeeId, startDateStr, endDateStr) => {
 
 // Calculate attendance summary
 const calculateAttendanceSummary = (attendanceRecords, leaves, startDateStr, endDateStr, joiningDate = null) => {
-    const startDate = new Date(startDateStr);
-    const endDate = new Date(endDateStr);
-    const joinDate = joiningDate ? new Date(joiningDate) : null;
+    const startDate = new Date(`${startDateStr}T00:00:00`);
+    const endDate   = new Date(`${endDateStr}T00:00:00`);
+    const joinDate  = joiningDate ? new Date(joiningDate.toISOString().split('T')[0] + 'T00:00:00') : null;
+
+    // Use local date string (YYYY-MM-DD) to avoid UTC offset issues
+    const toLocalDateStr = (d) => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+    };
 
     const attendanceMap = {};
     attendanceRecords.forEach(record => {
-        attendanceMap[record.attendance_date] = record;
+        // attendance_date is already YYYY-MM-DD string from DB
+        const key = record.attendance_date.split('T')[0];
+        attendanceMap[key] = record;
     });
 
     const leaveMap = {};
     leaves.forEach(leave => {
-        const leaveStart = new Date(leave.start_date);
-        const leaveEnd = new Date(leave.end_date);
+        const leaveStart = new Date(`${leave.start_date.split('T')[0]}T00:00:00`);
+        const leaveEnd   = new Date(`${leave.end_date.split('T')[0]}T00:00:00`);
         for (let d = new Date(leaveStart); d <= leaveEnd; d.setDate(d.getDate() + 1)) {
-            const dateStr = d.toISOString().split('T')[0];
+            const dateStr = toLocalDateStr(d);
             if (!leaveMap[dateStr]) {
                 leaveMap[dateStr] = {
                     type: leave.leave_type,
@@ -157,67 +188,66 @@ const calculateAttendanceSummary = (attendanceRecords, leaves, startDateStr, end
 
     const currentDate = new Date(startDate);
     while (currentDate <= endDate) {
-        const dateStr = currentDate.toISOString().split('T')[0];
-        const dayOfWeek = currentDate.getDay();
-        const isWeekday = dayOfWeek !== 0 && dayOfWeek !== 6;
+        const dateStr    = toLocalDateStr(currentDate);
+        const dayOfWeek  = currentDate.getDay();
+        const isWeekday  = dayOfWeek !== 0 && dayOfWeek !== 6;
 
-        // Skip weekends (Saturday/Sunday)
         if (!isWeekday) {
             currentDate.setDate(currentDate.getDate() + 1);
             continue;
         }
 
-        // Skip days before joining date
         if (joinDate && currentDate < joinDate) {
             currentDate.setDate(currentDate.getDate() + 1);
             continue;
         }
 
         const attendance = attendanceMap[dateStr];
-        const leave = leaveMap[dateStr];
+        const leave      = leaveMap[dateStr];
 
         if (leave) {
             if (leave.type === 'Unpaid') {
-                if (leave.duration === 'Half Day') {
-                    unpaidLeaveDays += 0.5;
-                } else {
-                    unpaidLeaveDays += 1;
-                }
+                unpaidLeaveDays += leave.duration === 'Half Day' ? 0.5 : 1;
             } else {
-                if (leave.duration === 'Half Day') {
-                    paidLeaveDays += 0.5;
-                } else {
-                    paidLeaveDays += 1;
-                }
+                paidLeaveDays += leave.duration === 'Half Day' ? 0.5 : 1;
             }
         } else if (attendance) {
-            const hasClockIn = attendance.clock_in;
-            const hasClockOut = attendance.clock_out;
+            // Use DB status field directly — it's already correctly set by clockOut
+            // Also handle still-clocked-in (clock_out null but status='present')
+            const dbStatus = (attendance.status || '').toLowerCase();
             const totalMinutes = attendance.total_minutes || 0;
-            const expectedMinutes = 9 * 60;
 
-            if (hasClockIn && hasClockOut) {
-                if (totalMinutes >= expectedMinutes) {
+            if (dbStatus === 'present') {
+                presentDays++;
+            } else if (dbStatus === 'half_day') {
+                halfDays++;
+                presentDays += 0.5;
+            } else if (dbStatus === 'absent') {
+                absentDays++;
+            } else if (attendance.clock_in && !attendance.clock_out) {
+                // Still working — count as present for salary
+                presentDays++;
+            } else if (attendance.clock_in && attendance.clock_out) {
+                // Fallback: calculate from total_minutes
+                if (totalMinutes >= 9 * 60) {
                     presentDays++;
                 } else if (totalMinutes >= 300) {
                     halfDays++;
+                    presentDays += 0.5;
                 } else {
                     absentDays++;
                 }
-            } else if (hasClockIn && !hasClockOut) {
-                absentDays++;
             } else {
                 absentDays++;
             }
 
             if (attendance.overtime_hours > 0) {
-                totalOvertimeHours += attendance.overtime_hours || 0;
-                totalOvertimeAmount += attendance.overtime_amount || 0;
+                totalOvertimeHours  += Number(attendance.overtime_hours)  || 0;
+                totalOvertimeAmount += Number(attendance.overtime_amount) || 0;
             }
-
             if (attendance.late_minutes > 0) {
                 lateDays++;
-                totalLateMinutes += attendance.late_minutes || 0;
+                totalLateMinutes += Number(attendance.late_minutes) || 0;
             }
         } else {
             absentDays++;
@@ -262,8 +292,18 @@ exports.generateSalarySlip = async (req, res) => {
             .from('salary_slips').select('*')
             .eq('employee_id', employee_id).eq('month', month).eq('year', year)
             .maybeSingle();
+
         if (existingSlip) {
-            return res.json({ success: true, message: 'Salary slip already exists', salarySlip: existingSlip });
+            // If existing slip has wrong data (0 present but non-zero salary), delete and regenerate
+            const hasWrongData = existingSlip.present_days === 0 &&
+                                 existingSlip.paid_leave_days === 0 &&
+                                 parseFloat(existingSlip.basic_salary) > 0;
+            if (!hasWrongData) {
+                return res.json({ success: true, message: 'Salary slip already exists', salarySlip: existingSlip });
+            }
+            // Delete wrong slip and regenerate
+            await supabase.from('salary_slips').delete().eq('id', existingSlip.id);
+            console.log('🔄 Deleted wrong salary slip, regenerating...');
         }
 
         const monthlySalary = parseFloat(employee.gross_salary || employee.salary || 0);
@@ -287,19 +327,21 @@ exports.generateSalarySlip = async (req, res) => {
         );
 
         // ── 5. Salary calculation ──
-        // Deduct absent days + unpaid leave days + half days (0.5 each)
-        const deductibleDays = summary.absentDays + summary.unpaidLeaveDays + (summary.halfDays * 0.5);
+        // basicSalary = only days actually worked or on paid leave
+        // If no attendance data at all AND no leaves, basic = 0
+        const totalPaidDays = summary.presentDays + summary.paidLeaveDays;
+        const basicSalary = parseFloat((totalPaidDays * perDaySalary).toFixed(2));
+
+        // Unpaid deduction for record-keeping
+        const deductibleDays  = summary.absentDays + summary.unpaidLeaveDays;
         const unpaidDeduction = parseFloat((deductibleDays * perDaySalary).toFixed(2));
 
-        // Basic salary after attendance deduction
-        const basicSalary = parseFloat(Math.max(0, monthlySalary - unpaidDeduction).toFixed(2));
+        // OT from attendance records
+        const overtimeHours  = parseFloat((summary.totalOvertimeHours  || 0).toFixed(2));
+        const overtimeAmount = parseFloat((summary.totalOvertimeAmount || 0).toFixed(2));
 
-        // OT from attendance records (use passed value or sum from records)
-        const overtimeHours  = parseFloat((req.body.overtime_hours  || summary.totalOvertimeHours  || 0).toFixed(2));
-        const overtimeAmount = parseFloat((req.body.overtime_amount || summary.totalOvertimeAmount || 0).toFixed(2));
-
-        // Fixed DT deduction
-        const dtDeduction = 200;
+        // Fixed DT deduction — only apply if employee has some earnings
+        const dtDeduction = basicSalary > 0 ? 200 : 0;
 
         // Net salary
         const netSalary = parseFloat(Math.max(0, basicSalary + overtimeAmount - dtDeduction).toFixed(2));
@@ -318,7 +360,7 @@ exports.generateSalarySlip = async (req, res) => {
             absent_days:        summary.absentDays,
             paid_leave_days:    summary.paidLeaveDays,
             unpaid_leave_days:  summary.unpaidLeaveDays,
-            unpaid_deduction:   unpaidDeduction,
+            unpaid_deduction:   parseFloat((deductibleDays * perDaySalary).toFixed(2)),
             basic_salary:       basicSalary,
             overtime_hours:     overtimeHours,
             overtime_amount:    overtimeAmount,
@@ -331,8 +373,9 @@ exports.generateSalarySlip = async (req, res) => {
         console.log('📝 Salary calculation:', {
             monthlySalary, totalWorkingDays, perDaySalary: perDaySalary.toFixed(2),
             presentDays: summary.presentDays, halfDays: summary.halfDays,
-            absentDays: summary.absentDays, unpaidLeaveDays: summary.unpaidLeaveDays,
-            deductibleDays, unpaidDeduction, basicSalary,
+            absentDays: summary.absentDays, paidLeaveDays: summary.paidLeaveDays,
+            unpaidLeaveDays: summary.unpaidLeaveDays,
+            deductibleDays, basicSalary,
             overtimeHours, overtimeAmount, dtDeduction, netSalary
         });
 

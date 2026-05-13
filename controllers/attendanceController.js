@@ -715,6 +715,7 @@ exports.clockIn = async (req, res) => {
         res.status(500).json({ success: false, message: 'Failed to clock in', error: error.message });
     }
 };
+
 exports.clockOut = async (req, res) => {
     try {
         console.log('📍 CLOCK-OUT REQUEST START');
@@ -911,6 +912,7 @@ exports.clockOut = async (req, res) => {
         });
     }
 };
+
 // Clock Out for Missed/Previous Day Attendance - UPDATED to use current time
 exports.clockOutMissed = async (req, res) => {
     try {
@@ -2485,8 +2487,6 @@ exports.markAbsentEmployeesAsLeave = async (req, res) => {
         });
     }
 };
-
-// Add this function to your attendanceController.js file (before module.exports = exports;)
 
 // Get team attendance report for reporting manager
 exports.getTeamAttendanceReport = async (req, res) => {
