@@ -1068,7 +1068,14 @@ exports.getTodayAttendance = async (req, res) => {
         }
 
         // Use today's attendance if it exists, otherwise use active session attendance
-        const attendanceToProcess = todayAttendance && todayAttendance.length > 0 ? todayAttendance[0] : activeSessionAttendance;
+        // Also accept active session attendance if its attendance_date matches today IST
+        const activeSessionMatchesToday = activeSessionAttendance &&
+            activeSessionAttendance.attendance_date &&
+            activeSessionAttendance.attendance_date.split('T')[0] === todayStr;
+
+        const attendanceToProcess = (todayAttendance && todayAttendance.length > 0)
+            ? todayAttendance[0]
+            : (activeSessionMatchesToday ? activeSessionAttendance : null);
 
         if (attendanceToProcess) {
             formattedAttendance = { ...attendanceToProcess };
@@ -1419,7 +1426,8 @@ exports.getMissedClockOuts = async (req, res) => {
             if (totalMinutes < 0) totalMinutes += 24 * 60;
             const totalHours = totalMinutes / 60;
 
-            const isToday = record.attendance_date === todayISTDate;
+            const recordDate = record.attendance_date.split('T')[0];
+            const isToday = recordDate === todayISTDate;
             const isRejected = record.regularization_status === 'rejected';
             // Allow regularization if: not today, not already regularized, and either
             // previous request was rejected OR enough hours worked (>= expected shift hours)
