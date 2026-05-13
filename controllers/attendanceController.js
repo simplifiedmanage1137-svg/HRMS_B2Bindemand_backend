@@ -1426,12 +1426,23 @@ exports.getMissedClockOuts = async (req, res) => {
             if (totalMinutes < 0) totalMinutes += 24 * 60;
             const totalHours = totalMinutes / 60;
 
-            const recordDate = record.attendance_date.split('T')[0];
+        const recordDate = record.attendance_date.split('T')[0];
             const isToday = recordDate === todayISTDate;
             const isRejected = record.regularization_status === 'rejected';
-            // Allow regularization if: not today, not already regularized, and either
-            // previous request was rejected OR enough hours worked (>= expected shift hours)
-            const canRegularize = !isToday && !record.is_regularized &&
+
+            // Check if there's an active session for this record (employee still working)
+            const { data: activeSessions } = await supabase
+                .from('attendance_sessions')
+                .select('id')
+                .eq('employee_id', employee_id)
+                .eq('session_id', record.session_id)
+                .eq('is_active', true)
+                .limit(1);
+            const hasActiveSession = activeSessions && activeSessions.length > 0;
+
+            // Can regularize only if: not today, not already regularized,
+            // no active session still running, and not pending request
+            const canRegularize = !isToday && !record.is_regularized && !hasActiveSession &&
                 (!record.regularization_requested || isRejected);
 
             // Format clock-in for display
