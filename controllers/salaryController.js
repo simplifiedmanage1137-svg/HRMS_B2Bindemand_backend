@@ -18,8 +18,8 @@ const getCycleDates = (month, year) => {
     const endDateStr = `${year}-${pad(month)}-25`;
 
     return {
-        startDate: new Date(`${startDateStr}T00:00:00`),
-        endDate: new Date(`${endDateStr}T00:00:00`),
+        startDate: parseLocalDate(startDateStr),
+        endDate: parseLocalDate(endDateStr),
         startDateStr,
         endDateStr,
         startMonth: actualStartMonth,
@@ -29,13 +29,19 @@ const getCycleDates = (month, year) => {
     };
 };
 
+// Parse date string YYYY-MM-DD as local date (avoid UTC shift)
+const parseLocalDate = (dateStr) => {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return new Date(y, m - 1, d);
+};
+
 // Calculate working days in cycle (Monday to Friday only)
 const calculateWorkingDaysInCycle = (startDate, endDate, joiningDate = null) => {
     let workingDays = 0;
-    const start    = new Date(`${startDate.toISOString().split('T')[0]}T00:00:00`);
-    const end      = new Date(`${endDate.toISOString().split('T')[0]}T00:00:00`);
+    const start    = parseLocalDate(startDate.toISOString().split('T')[0]);
+    const end      = parseLocalDate(endDate.toISOString().split('T')[0]);
     const joinDate = joiningDate
-        ? new Date(joiningDate.toISOString().split('T')[0] + 'T00:00:00')
+        ? parseLocalDate(joiningDate.toISOString().split('T')[0])
         : null;
 
     const currentDate = new Date(start);
@@ -55,9 +61,9 @@ const calculateWorkingDaysInCycle = (startDate, endDate, joiningDate = null) => 
 const calculateDaysEmployedInCycle = (startDate, endDate, joiningDate) => {
     if (!joiningDate) return null;
 
-    const joinDate = new Date(joiningDate);
-    const cycleStart = new Date(startDate);
-    const cycleEnd = new Date(endDate);
+    const joinDate   = parseLocalDate(joiningDate.toISOString().split('T')[0]);
+    const cycleStart = parseLocalDate(startDate.toISOString().split('T')[0]);
+    const cycleEnd   = parseLocalDate(endDate.toISOString().split('T')[0]);
 
     if (joinDate > cycleEnd) return 0;
     if (joinDate <= cycleStart) return null;
@@ -142,9 +148,9 @@ const getApprovedLeaves = async (employeeId, startDateStr, endDateStr) => {
 
 // Calculate attendance summary
 const calculateAttendanceSummary = (attendanceRecords, leaves, startDateStr, endDateStr, joiningDate = null) => {
-    const startDate = new Date(`${startDateStr}T00:00:00`);
-    const endDate   = new Date(`${endDateStr}T00:00:00`);
-    const joinDate  = joiningDate ? new Date(joiningDate.toISOString().split('T')[0] + 'T00:00:00') : null;
+    const startDate = parseLocalDate(startDateStr);
+    const endDate   = parseLocalDate(endDateStr);
+    const joinDate  = joiningDate ? parseLocalDate(joiningDate.toISOString().split('T')[0]) : null;
 
     // Use local date string (YYYY-MM-DD) to avoid UTC offset issues
     const toLocalDateStr = (d) => {
@@ -287,26 +293,17 @@ exports.generateSalarySlip = async (req, res) => {
         // Get cycle dates
         const cycle = getCycleDates(parseInt(month), parseInt(year));
 
-        // Check if salary slip already exists
+        // Check if salary slip already exists — always delete and regenerate fresh
         const { data: existingSlip } = await supabase
-            .from('salary_slips').select('*')
+            .from('salary_slips').select('id')
             .eq('employee_id', employee_id).eq('month', month).eq('year', year)
             .maybeSingle();
 
         if (existingSlip) {
-            // If existing slip has wrong data (0 present but non-zero salary), delete and regenerate
-            const hasWrongData = existingSlip.present_days === 0 &&
-                                 existingSlip.paid_leave_days === 0 &&
-                                 parseFloat(existingSlip.basic_salary) > 0;
-            if (!hasWrongData) {
-                return res.json({ success: true, message: 'Salary slip already exists', salarySlip: existingSlip });
-            }
-            // Delete wrong slip and regenerate
             await supabase.from('salary_slips').delete().eq('id', existingSlip.id);
-            console.log('🔄 Deleted wrong salary slip, regenerating...');
         }
 
-        const monthlySalary = parseFloat(employee.gross_salary || employee.salary || 0);
+        const monthlySalary = parseFloat(employee.in_hand_salary || employee.gross_salary || employee.salary || 0);
         const joiningDate   = employee.joining_date ? new Date(employee.joining_date) : null;
 
         // ── 1. Total working days in cycle (Mon–Fri), respecting joining date ──
