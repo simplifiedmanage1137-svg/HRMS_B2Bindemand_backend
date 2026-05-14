@@ -433,6 +433,7 @@ exports.clockIn = async (req, res) => {
         const emp = employees[0];
 
         // ✅ NEW: Check for any incomplete attendance record from previous day(s)
+        // But ONLY block if the record is NOT part of an active session (night shift support)
         const todayIST = nowIST().split(' ')[0];
         const { data: incompleteRecords } = await supabase
             .from('attendance')
@@ -447,16 +448,29 @@ exports.clockIn = async (req, res) => {
             const incompleteRecord = incompleteRecords[0];
             const incompleteDate = incompleteRecord.attendance_date;
 
-            console.log(`⚠️ Found incomplete attendance for ${incompleteDate}. Please clock out first.`);
+            // Check if this record has an active session (night shift employee still working)
+            const { data: activeSessionForRecord } = await supabase
+                .from('attendance_sessions')
+                .select('id, session_id, is_active')
+                .eq('employee_id', employee_id)
+                .eq('session_id', incompleteRecord.session_id)
+                .eq('is_active', true)
+                .maybeSingle();
 
-            return res.status(400).json({
-                success: false,
-                message: `You have an incomplete attendance record from ${incompleteDate}. Please clock out for that day first before clocking in for today.`,
-                has_missed_clockout: true,
-                attendance_id: incompleteRecord.id,
-                attendance_date: incompleteDate,
-                clock_in_time: incompleteRecord.clock_in_ist || incompleteRecord.clock_in
-            });
+            // Only block clock-in if there's NO active session for this incomplete record
+            // (i.e., it's a genuinely missed clock-out, not a night shift still in progress)
+            if (!activeSessionForRecord) {
+                console.log(`⚠️ Found incomplete attendance for ${incompleteDate}. Please clock out first.`);
+
+                return res.status(400).json({
+                    success: false,
+                    message: `You have an incomplete attendance record from ${incompleteDate}. Please clock out for that day first before clocking in for today.`,
+                    has_missed_clockout: true,
+                    attendance_id: incompleteRecord.id,
+                    attendance_date: incompleteDate,
+                    clock_in_time: incompleteRecord.clock_in_ist || incompleteRecord.clock_in
+                });
+            }
         }
 
         // Check for existing active session
@@ -716,6 +730,8 @@ exports.clockIn = async (req, res) => {
     }
 };
 
+// In attendanceController.js - Update clockOut function
+
 exports.clockOut = async (req, res) => {
     try {
         console.log('📍 CLOCK-OUT REQUEST START');
@@ -732,6 +748,7 @@ exports.clockOut = async (req, res) => {
         const now = new Date();
         const startTime = Date.now();
 
+        // ✅ If session_id provided, verify it's active
         if (session_id) {
             const { data: session, error: sessionError } = await supabase
                 .from('attendance_sessions')
@@ -752,7 +769,7 @@ exports.clockOut = async (req, res) => {
             }
         }
 
-        // If no session_id provided, find the active session for this employee
+        // ✅ If no session_id provided, find the active session for this employee
         if (!finalSessionId) {
             console.log('🔍 No session_id provided, looking for active session...');
             const { data: activeSessions, error: sessionError } = await supabase
@@ -772,14 +789,29 @@ exports.clockOut = async (req, res) => {
             }
 
             if (!activeSessions || activeSessions.length === 0) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'No active session found. Please clock in first.'
-                });
-            }
+                // ✅ NEW: Check if there's a clock_in without clock_out for today
+                const todayIST = nowIST().split(' ')[0];
+                const { data: todayAttendance } = await supabase
+                    .from('attendance')
+                    .select('id, session_id, clock_in_ist')
+                    .eq('employee_id', employee_id)
+                    .eq('attendance_date', todayIST)
+                    .is('clock_out', null)
+                    .maybeSingle();
 
-            finalSessionId = activeSessions[0].session_id;
-            console.log(`✅ Found active session: ${finalSessionId}`);
+                if (todayAttendance && todayAttendance.session_id) {
+                    finalSessionId = todayAttendance.session_id;
+                    console.log(`✅ Found session from today's attendance: ${finalSessionId}`);
+                } else {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'No active session found. Please clock in first.'
+                    });
+                }
+            } else {
+                finalSessionId = activeSessions[0].session_id;
+                console.log(`✅ Found active session: ${finalSessionId}`);
+            }
         }
 
         // Fetch attendance record with employee data
@@ -798,14 +830,27 @@ exports.clockOut = async (req, res) => {
             throw attendanceError;
         }
 
-        if (!attendanceRecords || attendanceRecords.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: 'No active attendance record found for this session'
-            });
-        }
+        // ✅ Cross-midnight fix: if no record found (date filter may have excluded previous day's record)
+        let attendanceRecord = attendanceRecords && attendanceRecords.length > 0 ? attendanceRecords[0] : null;
 
-        const attendanceRecord = attendanceRecords[0];
+        if (!attendanceRecord) {
+            const { data: crossMidnightRecords } = await supabase
+                .from('attendance')
+                .select('id, employee_id, session_id, clock_in, clock_in_ist, attendance_date, employees!inner(shift_timing)')
+                .eq('employee_id', employee_id)
+                .eq('session_id', finalSessionId)
+                .is('clock_out', null)
+                .order('clock_in', { ascending: false })
+                .limit(1);
+
+            if (!crossMidnightRecords || crossMidnightRecords.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'No active attendance record found for this session'
+                });
+            }
+            attendanceRecord = crossMidnightRecords[0];
+        }
         const employee = attendanceRecord.employees;
         const queryTime = Date.now() - startTime;
         console.log(`✅ Query time: ${queryTime}ms`);
@@ -826,14 +871,13 @@ exports.clockOut = async (req, res) => {
         const expectedWorkHours = shiftTiming.totalHours || 9;
         const expectedWorkMinutes = expectedWorkHours * 60;
 
-        // ✅ UPDATED: Calculate status based on expected work hours
-        let status = 'half_day'; // Default to half_day
+        // Calculate status based on expected work hours
+        let status = 'half_day';
         if (totalMinutes >= expectedWorkMinutes) {
-            status = 'present';  // Full day (expected work hours or more)
+            status = 'present';
         } else if (totalMinutes < 300) {
-            status = 'absent';   // Less than 5 hours
+            status = 'absent';
         }
-        // Between 5 hours and expectedWorkMinutes = half_day
 
         const overtime = calculateOvertime(totalHours, shiftTiming.totalHours);
 
@@ -1068,14 +1112,20 @@ exports.getTodayAttendance = async (req, res) => {
         }
 
         // Use today's attendance if it exists, otherwise use active session attendance
-        // Also accept active session attendance if its attendance_date matches today IST
+        // Cross-midnight support: also accept active session attendance from previous day
+        // if the session is still active (employee hasn't clocked out yet)
         const activeSessionMatchesToday = activeSessionAttendance &&
             activeSessionAttendance.attendance_date &&
             activeSessionAttendance.attendance_date.split('T')[0] === todayStr;
 
+        const activeSessionIsCrossMidnight = activeSessionAttendance &&
+            activeSessionAttendance.attendance_date &&
+            activeSessionAttendance.attendance_date.split('T')[0] !== todayStr &&
+            !activeSessionAttendance.clock_out; // Still active, just crossed midnight
+
         const attendanceToProcess = (todayAttendance && todayAttendance.length > 0)
             ? todayAttendance[0]
-            : (activeSessionMatchesToday ? activeSessionAttendance : null);
+            : (activeSessionMatchesToday || activeSessionIsCrossMidnight ? activeSessionAttendance : null);
 
         if (attendanceToProcess) {
             formattedAttendance = { ...attendanceToProcess };
@@ -1386,8 +1436,6 @@ exports.getAttendanceReport = async (req, res) => {
     }
 };
 
-// In attendanceController.js - Replace getMissedClockOuts function
-
 exports.getMissedClockOuts = async (req, res) => {
     try {
         const { employee_id } = req.params;
@@ -1404,7 +1452,11 @@ exports.getMissedClockOuts = async (req, res) => {
         const shiftTiming = parseShiftTiming(employee?.shift_timing);
         const expectedShiftHours = shiftTiming.totalHours || 9;
 
-        // ✅ FIX: Get records where clock_out IS NULL
+        // ✅ NEW: Regularization threshold set to 15 hours
+        const REGULARIZATION_THRESHOLD_HOURS = 15;
+        const REGULARIZATION_THRESHOLD_MINUTES = REGULARIZATION_THRESHOLD_HOURS * 60;
+
+        // Get records where clock_out IS NULL
         const { data: missedRecords, error } = await supabase
             .from('attendance')
             .select('*, employees!inner(first_name, last_name, shift_timing)')
@@ -1433,20 +1485,35 @@ exports.getMissedClockOuts = async (req, res) => {
             const clockInMs = toUTCMs(clockInValue);
             let totalMinutes = clockInMs != null ? (nowMs - clockInMs) / (1000 * 60) : 0;
             if (totalMinutes < 0) totalMinutes += 24 * 60;
+            // Cap at 24 hours for single-day attendance records
+            // (prevents multi-day diff from inflating hours for old missed records)
+            if (totalMinutes > 24 * 60) totalMinutes = 24 * 60;
             const totalHours = totalMinutes / 60;
 
             const recordDate = record.attendance_date.split('T')[0];
             const isToday = recordDate === todayISTDate;
             const isRejected = record.regularization_status === 'rejected';
 
-            // ✅ CRITICAL: canRegularize only for PAST dates (not today) with active session NOT running
+            // Check if this record belongs to the active session (employee is still clocked in)
+            const isActiveSessionRecord = activeSession && activeSession.session_id === record.session_id;
+
+            // canRegularize:
+            // 1. NOT today's record (past date)
+            // 2. NOT part of an active session
+            // 3. Total hours >= 15 threshold (or rejection case: always allow re-request)
+            // 4. Not already regularized
+            // 5. Not already pending (or was rejected - allow re-request)
             let canRegularize = false;
 
-            if (!isToday && !record.is_regularized) {
-                // Past date - can regularize if not already requested or was rejected
-                canRegularize = (!record.regularization_requested || isRejected);
+            if (!isToday && !isActiveSessionRecord && !record.is_regularized) {
+                if (isRejected) {
+                    // Always allow re-request after rejection, regardless of hours
+                    canRegularize = true;
+                } else {
+                    canRegularize = (totalMinutes >= REGULARIZATION_THRESHOLD_MINUTES) &&
+                        !record.regularization_requested;
+                }
             }
-            // For today's record, DO NOT show regularization - show Clock Out button instead
 
             // Format clock-in for display
             let clockInDisplay = clockInValue;
@@ -1470,9 +1537,11 @@ exports.getMissedClockOuts = async (req, res) => {
                 regularization_requested: record.regularization_requested || false,
                 regularization_status: record.regularization_status || null,
                 total_hours_worked: totalHours.toFixed(2),
+                total_minutes_worked: totalMinutes,
                 expected_hours: expectedShiftHours,
+                regularization_threshold: REGULARIZATION_THRESHOLD_HOURS,
                 can_regularize: canRegularize,
-                hours_needed: canRegularize ? 0 : (expectedShiftHours - totalHours).toFixed(2),
+                hours_needed: canRegularize ? 0 : Math.max(0, REGULARIZATION_THRESHOLD_HOURS - totalHours).toFixed(2),
                 has_clock_out: false,
                 is_today: isToday,
                 has_active_session: !!activeSession
@@ -1482,6 +1551,7 @@ exports.getMissedClockOuts = async (req, res) => {
         res.json({
             success: true,
             missed_clockouts: formattedRecords,
+            regularization_threshold: REGULARIZATION_THRESHOLD_HOURS,
             has_active_session: !!activeSession
         });
 
