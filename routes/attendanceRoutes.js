@@ -47,6 +47,9 @@ module.exports = (supabase, authenticateToken, requireAdmin) => {
         res.json(result);
     });
 
+    // Fix orphaned attendance records (clock_out NULL but session closed) - All employees
+    router.post('/fix-orphaned', authenticateToken, requireAdmin, attendanceController.fixOrphanedAttendance);
+
     // Update historical late marks (Admin only)
     router.post('/update-historical-late-marks', authenticateToken, requireAdmin, attendanceController.updateHistoricalLateMarks);
 

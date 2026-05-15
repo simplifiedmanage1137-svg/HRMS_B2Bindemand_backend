@@ -369,9 +369,15 @@ cron.schedule('0 * * * *', async () => {
         const result = await attendanceController.autoCloseStaleSessions();
         const duration = Date.now() - startTime;
         console.log(`✅ Auto-close completed in ${duration}ms: ${result.closedCount} sessions closed`);
-        
         if (isProduction || result.closedCount > 0) {
             logCronActivity('AUTO_CLOSE', `${result.closedCount} sessions closed`, duration);
+        }
+
+        // Also fix any orphaned records (clock_out NULL but session closed)
+        const fixResult = await attendanceController.fixOrphanedAttendance(null, null);
+        if (fixResult.fixed > 0) {
+            console.log(`🔧 Hourly fix: ${fixResult.fixed} orphaned records fixed`);
+            logCronActivity('ORPHAN_FIX', `${fixResult.fixed} records fixed`);
         }
     } catch (error) {
         console.error('❌ Auto-close cron error:', error);
@@ -528,19 +534,17 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🌍 Environment: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
     console.log(`🔗 Public URL: ${process.env.RENDER_EXTERNAL_URL || 'Not set'}`);
     console.log('='.repeat(70));
-    console.log(`🔧 CORS Allowed Origins:`);
-    uniqueAllowedOrigins.forEach(origin => {
-        console.log(`   - ${origin}`);
-    });
-    console.log('='.repeat(70));
-    console.log(`✨ Features enabled:`);
-    console.log(`   - Attendance Regularization`);
-    console.log(`   - Auto-close Missed Clock-outs`);
-    console.log(`   - Overtime Calculation`);
-    console.log(`   - Comp-off Management`);
-    console.log(`   - Employee Ratings`);
-    console.log(`   - Cron Jobs (Hourly/Daily/Weekly)`);
-    console.log('='.repeat(70));
+
+    // ✅ Auto-fix orphaned attendance records on every server start
+    setTimeout(async () => {
+        try {
+            console.log('\n🔧 Running startup fix for orphaned attendance records...');
+            const result = await attendanceController.fixOrphanedAttendance(null, null);
+            console.log(`✅ Startup fix done: ${result.fixed} records fixed, ${result.skipped} skipped`);
+        } catch (err) {
+            console.error('❌ Startup fix error:', err.message);
+        }
+    }, 3000);
 });
 
 // Handle graceful shutdown
