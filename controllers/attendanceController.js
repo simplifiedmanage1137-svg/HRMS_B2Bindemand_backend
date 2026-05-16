@@ -533,23 +533,60 @@ exports.clockIn = async (req, res) => {
 
         if (activeSessions && activeSessions.length > 0) {
             const activeSession = activeSessions[0];
-            // Compare using IST dates to avoid UTC midnight mismatch
-            const sessionISTDate = utcMsToISTString(new Date(activeSession.clock_in_time).getTime()).split(' ')[0];
-            const todayISTDate = nowIST().split(' ')[0];
 
-            if (sessionISTDate !== todayISTDate) {
-                // Previous day's active session still open → employee must clock out first
-                return res.status(400).json({
-                    success: false,
-                    message: `You have an active session from ${sessionISTDate}. Please clock out for that day first before clocking in for today.`,
-                    has_missed_clockout: true,
-                    attendance_date: sessionISTDate
-                });
+            // ✅ STALE SESSION CHECK: If attendance for this session already has clock_out, auto-fix it
+            const { data: staleAtt } = await supabase
+                .from('attendance')
+                .select('id, clock_out, clock_out_ist, attendance_date')
+                .eq('employee_id', employee_id)
+                .eq('session_id', activeSession.session_id)
+                .not('clock_out', 'is', null)
+                .maybeSingle();
+
+            if (staleAtt) {
+                console.log(`🔧 Stale active session found at clock-in. Force-closing session ${activeSession.session_id}`);
+                await supabase
+                    .from('attendance_sessions')
+                    .update({ is_active: false, clock_out_time: staleAtt.clock_out })
+                    .eq('session_id', activeSession.session_id)
+                    .eq('employee_id', employee_id);
+                // Allow clock-in to proceed
             } else {
-                return res.status(400).json({
-                    success: false,
-                    message: 'You have already clocked in today. Please clock out first.'
-                });
+                // Check if orphan session (no attendance record at all)
+                const { data: anyAtt } = await supabase
+                    .from('attendance')
+                    .select('id')
+                    .eq('employee_id', employee_id)
+                    .eq('session_id', activeSession.session_id)
+                    .maybeSingle();
+
+                if (!anyAtt) {
+                    console.log(`🔧 Orphan active session found at clock-in. Force-closing session ${activeSession.session_id}`);
+                    await supabase
+                        .from('attendance_sessions')
+                        .update({ is_active: false, clock_out_time: new Date().toISOString() })
+                        .eq('session_id', activeSession.session_id)
+                        .eq('employee_id', employee_id);
+                    // Allow clock-in to proceed
+                } else {
+                    // Compare using IST dates to avoid UTC midnight mismatch
+                    const sessionISTDate = utcMsToISTString(new Date(activeSession.clock_in_time).getTime()).split(' ')[0];
+                    const todayISTDate = nowIST().split(' ')[0];
+
+                    if (sessionISTDate !== todayISTDate) {
+                        return res.status(400).json({
+                            success: false,
+                            message: `You have an active session from ${sessionISTDate}. Please clock out for that day first before clocking in for today.`,
+                            has_missed_clockout: true,
+                            attendance_date: sessionISTDate
+                        });
+                    } else {
+                        return res.status(400).json({
+                            success: false,
+                            message: 'You have already clocked in today. Please clock out first.'
+                        });
+                    }
+                }
             }
         }
 
@@ -791,7 +828,7 @@ exports.clockOut = async (req, res) => {
         {
             const { data: activeSessions } = await supabase
                 .from('attendance_sessions')
-                .select('session_id')
+                .select('session_id, clock_in_time')
                 .eq('employee_id', employee_id)
                 .eq('is_active', true)
                 .order('created_at', { ascending: false })
@@ -799,32 +836,70 @@ exports.clockOut = async (req, res) => {
 
             if (activeSessions && activeSessions.length > 0) {
                 finalSessionId = activeSessions[0].session_id;
-                console.log(`✅ Using active session from DB: ${finalSessionId}`);
-            } else {
-                // No active session — try any incomplete attendance record
-                const { data: incompleteAtt } = await supabase
-                    .from('attendance')
-                    .select('id, session_id')
-                    .eq('employee_id', employee_id)
-                    .not('clock_in', 'is', null)
-                    .is('clock_out', null)
-                    .order('attendance_date', { ascending: false })
-                    .limit(1);
+                console.log(`✅ Using active session from DB: ${finalSessionId}, clock_in_time: ${activeSessions[0].clock_in_time}`);
 
-                if (incompleteAtt && incompleteAtt.length > 0 && incompleteAtt[0].session_id) {
-                    finalSessionId = incompleteAtt[0].session_id;
-                    console.log(`✅ Found session from incomplete attendance: ${finalSessionId}`);
-                } else {
+                // ✅ SAFETY CHECK: Verify the attendance record for this session is not already clocked out
+                const { data: sessionAttRec } = await supabase
+                    .from('attendance')
+                    .select('id, clock_out, clock_out_ist, attendance_date')
+                    .eq('employee_id', employee_id)
+                    .eq('session_id', finalSessionId)
+                    .not('clock_out', 'is', null)
+                    .maybeSingle();
+
+                if (sessionAttRec) {
+                    // Attendance already clocked out but session still marked active — fix the stale session
+                    console.log(`🔧 Stale session detected: attendance already clocked out at ${sessionAttRec.clock_out_ist}. Force-closing session.`);
+                    await supabase
+                        .from('attendance_sessions')
+                        .update({ is_active: false, clock_out_time: sessionAttRec.clock_out })
+                        .eq('session_id', finalSessionId)
+                        .eq('employee_id', employee_id);
+
                     return res.status(400).json({
                         success: false,
-                        message: 'No active session found. Please clock in first.'
+                        message: 'Already clocked out for this session.',
+                        already_clocked_out: true,
+                        clock_out_ist: sessionAttRec.clock_out_ist,
+                        attendance_date: sessionAttRec.attendance_date,
+                        stale_session_fixed: true
                     });
                 }
+
+                // Case 2: No attendance record at all for this session (orphan session)
+                const { data: anyAttRec } = await supabase
+                    .from('attendance')
+                    .select('id')
+                    .eq('employee_id', employee_id)
+                    .eq('session_id', finalSessionId)
+                    .maybeSingle();
+
+                if (!anyAttRec) {
+                    console.log(`🔧 Orphan session detected (no attendance record). Force-closing session.`);
+                    await supabase
+                        .from('attendance_sessions')
+                        .update({ is_active: false, clock_out_time: new Date().toISOString() })
+                        .eq('session_id', finalSessionId)
+                        .eq('employee_id', employee_id);
+
+                    return res.status(400).json({
+                        success: false,
+                        message: 'No active session found. Please clock in first.',
+                        already_clocked_out: true,
+                        stale_session_fixed: true
+                    });
+                }
+            } else {
+                return res.status(400).json({
+                    success: false,
+                    message: 'No active session found. Please clock in first.'
+                });
             }
         }
 
         // Fetch attendance record with employee data
-        console.log('⏱️ Fetching attendance record...');
+        console.log('⏱️ Fetching attendance record for session:', finalSessionId);
+
         const { data: attendanceRecords, error: attendanceError } = await supabase
             .from('attendance')
             .select('id, employee_id, session_id, clock_in, clock_in_ist, attendance_date, employees!inner(shift_timing)')

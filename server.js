@@ -541,6 +541,55 @@ app.listen(PORT, '0.0.0.0', () => {
             console.log('\n🔧 Running startup fix for orphaned attendance records...');
             const result = await attendanceController.fixOrphanedAttendance(null, null);
             console.log(`✅ Startup fix done: ${result.fixed} records fixed, ${result.skipped} skipped`);
+
+            // ✅ NEW: Fix all stale active sessions (session is_active=true but attendance already clocked out)
+            console.log('🔧 Fixing stale active sessions for all employees...');
+            const { data: staleSessions } = await supabase
+                .from('attendance_sessions')
+                .select('session_id, employee_id, clock_in_time')
+                .eq('is_active', true);
+
+            let staleFixed = 0;
+            for (const session of (staleSessions || [])) {
+                // Case 1: Attendance already clocked out but session still active
+                const { data: attRec } = await supabase
+                    .from('attendance')
+                    .select('id, clock_out, clock_out_ist')
+                    .eq('employee_id', session.employee_id)
+                    .eq('session_id', session.session_id)
+                    .not('clock_out', 'is', null)
+                    .maybeSingle();
+
+                if (attRec) {
+                    await supabase
+                        .from('attendance_sessions')
+                        .update({ is_active: false, clock_out_time: attRec.clock_out })
+                        .eq('session_id', session.session_id)
+                        .eq('employee_id', session.employee_id);
+                    staleFixed++;
+                    console.log(`✅ Fixed stale session (clocked out) for ${session.employee_id}: ${session.session_id}`);
+                    continue;
+                }
+
+                // Case 2: No attendance record at all for this session (orphan session)
+                const { data: anyAttRec } = await supabase
+                    .from('attendance')
+                    .select('id')
+                    .eq('employee_id', session.employee_id)
+                    .eq('session_id', session.session_id)
+                    .maybeSingle();
+
+                if (!anyAttRec) {
+                    await supabase
+                        .from('attendance_sessions')
+                        .update({ is_active: false, clock_out_time: new Date().toISOString() })
+                        .eq('session_id', session.session_id)
+                        .eq('employee_id', session.employee_id);
+                    staleFixed++;
+                    console.log(`✅ Fixed orphan session (no attendance) for ${session.employee_id}: ${session.session_id}`);
+                }
+            }
+            console.log(`✅ Stale session fix done: ${staleFixed} sessions fixed`);
         } catch (err) {
             console.error('❌ Startup fix error:', err.message);
         }
