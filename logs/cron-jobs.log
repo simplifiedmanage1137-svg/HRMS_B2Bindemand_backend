@@ -32,3 +32,6 @@
 {"timestamp":"2026-05-12T18:29:15.781Z","type":"END_OF_DAY","message":"Marked 28 absent, 12 half_day","duration":15729,"environment":"development"}
 {"timestamp":"2026-05-13T18:29:11.338Z","type":"END_OF_DAY","message":"Marked 24 absent, 9 half_day","duration":11276,"environment":"development"}
 {"timestamp":"2026-05-14T18:29:10.740Z","type":"END_OF_DAY","message":"Marked 33 absent, 13 half_day","duration":10609,"environment":"development"}
+{"timestamp":"2026-05-18T18:31:17.987Z","type":"END_OF_DAY","message":"Marked 19 absent, 14 half_day","duration":137934,"environment":"development"}
+{"timestamp":"2026-05-18T18:35:42.394Z","type":"ORPHAN_FIX","message":"1 records fixed","duration":null,"environment":"development"}
+{"timestamp":"2026-05-19T13:30:04.089Z","type":"ORPHAN_FIX","message":"1 records fixed","duration":null,"environment":"development"}

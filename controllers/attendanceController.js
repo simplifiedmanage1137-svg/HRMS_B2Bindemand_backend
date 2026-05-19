@@ -131,7 +131,6 @@ const employeeHasDirectReports = async (employeeName) => {
 };
 
 // In your attendanceController.js - Update the canUserActOnRegularization function
-
 const canUserActOnRegularization = async (userEmployeeId, userRole, requestEmployeeId) => {
     // If no user or request employee, deny access
     if (!userEmployeeId || !requestEmployeeId) return false;
@@ -209,11 +208,13 @@ const toUTCMs = (val) => {
     if (!val) return null;
     if (val instanceof Date) return isNaN(val.getTime()) ? null : val.getTime();
     const s = String(val).trim();
+
     // UTC ISO string (has Z or +offset)
     if (/[Zz]$/.test(s) || /[+-]\d{2}:?\d{2}$/.test(s)) {
         const d = new Date(s);
         return isNaN(d.getTime()) ? null : d.getTime();
     }
+
     // IST local string "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS"
     const clean = s.replace('T', ' ').substring(0, 19);
     const [datePart, timePart] = clean.split(' ');
@@ -221,6 +222,7 @@ const toUTCMs = (val) => {
     const [y, mo, d] = datePart.split('-').map(Number);
     const [h, mi, sec = 0] = timePart.split(':').map(Number);
     if ([y, mo, d, h, mi].some(isNaN)) return null;
+
     // Treat as IST → subtract IST offset to get UTC ms
     return Date.UTC(y, mo - 1, d, h, mi, sec) - IST_OFFSET_MS;
 };
@@ -806,8 +808,6 @@ exports.clockIn = async (req, res) => {
 
 // In attendanceController.js - Update clockOut function
 
-// In attendanceController.js - Update clockOut function
-
 exports.clockOut = async (req, res) => {
     try {
         console.log('📍 CLOCK-OUT REQUEST START');
@@ -981,6 +981,7 @@ exports.clockOut = async (req, res) => {
         const clockInMs = toUTCMs(clockInIST);
         const clockOutMs = toUTCMs(clockOutIST);
         let totalMinutes = Math.round((clockOutMs - clockInMs) / (1000 * 60));
+        
         // midnight crossing guard
         if (totalMinutes < 0) totalMinutes += 24 * 60;
         const totalHours = totalMinutes / 60;
@@ -2070,8 +2071,6 @@ exports.rejectRegularization = async (req, res) => {
                 message: 'Rejection reason is required'
             });
         }
-
-
 
         // Get the regularization request
         const { data: request, error: fetchError } = await supabase
