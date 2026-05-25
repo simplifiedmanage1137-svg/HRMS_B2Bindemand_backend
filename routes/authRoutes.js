@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../config/supabase');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
@@ -108,9 +109,18 @@ router.post('/login', async (req, res) => {
             employeeId: user.employee_id 
         });
 
-        // For demo purposes, accept default password
-        const isValidPassword = password === 'Welcome@123' || 
-                               password === user.employee_id?.toLowerCase();
+        // Verify password:
+        // - DB always has bcrypt hash (either of Welcome@123 or user-set password)
+        // - Just do bcrypt compare
+        let isValidPassword = false;
+
+        if (!user.password) {
+            // No password in DB — allow Welcome@123 as default
+            isValidPassword = (password === 'Welcome@123');
+        } else {
+            // Always bcrypt compare (covers both default hashed Welcome@123 and user-set passwords)
+            isValidPassword = await bcrypt.compare(password, user.password);
+        }
 
         if (!isValidPassword) {
             console.log('❌ Invalid password for user:', email);
@@ -538,6 +548,48 @@ router.post('/reset-password', async (req, res) => {
             success: false,
             message: 'Server error'
         });
+    }
+});
+
+// Direct password reset by email (no token — employee sets new password from login page)
+router.post('/reset-password-direct', async (req, res) => {
+    try {
+        const { email, newPassword } = req.body;
+
+        if (!email || !newPassword) {
+            return res.status(400).json({ success: false, message: 'Email and new password are required' });
+        }
+        if (newPassword.length < 6) {
+            return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+        }
+
+        const { data: employee, error } = await supabase
+            .from('employees')
+            .select('employee_id, email')
+            .eq('email', email.toLowerCase().trim())
+            .maybeSingle();
+
+        if (error) throw error;
+        if (!employee) {
+            return res.status(404).json({ success: false, message: 'No account found with this email address' });
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+        const { error: updateError } = await supabase
+            .from('employees')
+            .update({ password: hashedPassword })
+            .eq('email', email.toLowerCase().trim());
+
+        if (updateError) throw updateError;
+
+        console.log('✅ Password reset for:', employee.employee_id);
+        res.json({ success: true, message: 'Password updated successfully. You can now login with your new password.' });
+
+    } catch (error) {
+        console.error('❌ Reset password error:', error);
+        res.status(500).json({ success: false, message: 'Server error', error: error.message });
     }
 });
 

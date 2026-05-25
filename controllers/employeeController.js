@@ -377,15 +377,28 @@ exports.createEmployee = async (req, res) => {
 // Get all employees (for admin)
 exports.getAllEmployees = async (req, res) => {
     try {
-        const { data: employees, error } = await supabase
-            .from('employees')
-            .select('*')
-            .order('created_at', { ascending: false });
+        let allEmployees = [];
+        let from = 0;
+        const batchSize = 1000;
 
-        if (error) throw error;
+        // Fetch all records in batches to bypass Supabase row limit
+        while (true) {
+            const { data, error } = await supabase
+                .from('employees')
+                .select('*')
+                .order('created_at', { ascending: false })
+                .range(from, from + batchSize - 1);
 
-        console.log(`Found ${employees?.length || 0} employees`);
-        res.json(employees || []);
+            if (error) throw error;
+            if (!data || data.length === 0) break;
+
+            allEmployees = allEmployees.concat(data);
+            if (data.length < batchSize) break;
+            from += batchSize;
+        }
+
+        console.log(`Found ${allEmployees.length} employees`);
+        res.json(allEmployees);
     } catch (error) {
         console.error('Error fetching employees:', error);
         res.status(500).json({ message: 'Error fetching employees' });

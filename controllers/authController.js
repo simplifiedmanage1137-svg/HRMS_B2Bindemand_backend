@@ -168,6 +168,52 @@ exports.verifyToken = async (req, res) => {
     }
 };
 
+// Direct password reset by email (no token needed — employee sets new password directly)
+exports.resetPasswordDirect = async (req, res) => {
+    try {
+        const { email, newPassword } = req.body;
+
+        if (!email || !newPassword) {
+            return res.status(400).json({ success: false, message: 'Email and new password are required' });
+        }
+
+        if (newPassword.length < 6) {
+            return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+        }
+
+        // Check if employee exists with this email
+        const { data: employees, error } = await supabase
+            .from('employees')
+            .select('employee_id, email')
+            .eq('email', email.toLowerCase().trim())
+            .maybeSingle();
+
+        if (error) throw error;
+
+        if (!employees) {
+            return res.status(404).json({ success: false, message: 'No account found with this email address' });
+        }
+
+        // Hash new password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+        // Update password in employees table
+        const { error: updateError } = await supabase
+            .from('employees')
+            .update({ password: hashedPassword })
+            .eq('email', email.toLowerCase().trim());
+
+        if (updateError) throw updateError;
+
+        res.json({ success: true, message: 'Password updated successfully' });
+
+    } catch (error) {
+        console.error('Reset password error:', error);
+        res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    }
+};
+
 // Optional: Password reset request
 exports.forgotPassword = async (req, res) => {
     try {

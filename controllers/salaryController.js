@@ -1,5 +1,7 @@
 const supabase = require('../config/supabase');
+const { isDateHoliday, getHolidayName } = require('../data/holidays');
 
+const FIXED_WORKING_DAYS = 22;
 // Helper function to get month name
 function getMonthName(monthNumber) {
     const months = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -55,6 +57,35 @@ const calculateWorkingDaysInCycle = (startDate, endDate, joiningDate = null) => 
         currentDate.setDate(currentDate.getDate() + 1);
     }
     return workingDays;
+};
+
+// Count company holidays (weekdays only) in cycle
+const countHolidaysInCycle = (startDateStr, endDateStr) => {
+    const startDate = parseLocalDate(startDateStr);
+    const endDate   = parseLocalDate(endDateStr);
+    let holidayDays = 0;
+    const holidayNames = [];
+
+    const toLocalDateStr = (d) => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+    };
+
+    const currentDate = new Date(startDate);
+    while (currentDate <= endDate) {
+        const dayOfWeek = currentDate.getDay();
+        if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+            const dateStr = toLocalDateStr(currentDate);
+            if (isDateHoliday(dateStr)) {
+                holidayDays++;
+                holidayNames.push({ date: dateStr, name: getHolidayName(dateStr) });
+            }
+        }
+        currentDate.setDate(currentDate.getDate() + 1);
+    }
+    return { holidayDays, holidayNames };
 };
 
 // Calculate days employed in the cycle (for prorated salary)
@@ -306,28 +337,31 @@ exports.generateSalarySlip = async (req, res) => {
         const monthlySalary = parseFloat(employee.in_hand_salary || employee.gross_salary || employee.salary || 0);
         const joiningDate   = employee.joining_date ? new Date(employee.joining_date) : null;
 
-        // ── 1. Total working days in cycle (Mon–Fri), respecting joining date ──
-        const totalWorkingDays = calculateWorkingDaysInCycle(cycle.startDate, cycle.endDate, joiningDate);
+        // ── 1. Actual working days in cycle (Mon–Fri only, 26th to 25th) ──
+        const totalWorkingDays = calculateWorkingDaysInCycle(cycle.startDate, cycle.endDate);
 
-        // ── 2. Per-day salary ──
+        // ── 2. Per-day salary based on actual cycle working days ──
         const perDaySalary = totalWorkingDays > 0 ? monthlySalary / totalWorkingDays : 0;
 
         // ── 3. Attendance & leave data ──
         const attendanceRecords = await getAttendanceRecords(employee_id, cycle.startDateStr, cycle.endDateStr);
         const leaveRecords      = await getApprovedLeaves(employee_id, cycle.startDateStr, cycle.endDateStr);
 
-        // ── 4. Calculate attendance summary ──
+        // ── 4. Count company holidays (weekdays only) in cycle ──
+        // Holidays are treated as present days (not deducted)
+        const { holidayDays, holidayNames } = countHolidaysInCycle(cycle.startDateStr, cycle.endDateStr);
+
+        // ── 5. Calculate attendance summary ──
         const summary = calculateAttendanceSummary(
             attendanceRecords, leaveRecords,
             cycle.startDateStr, cycle.endDateStr,
             joiningDate
         );
 
-        // ── 5. Salary calculation ──
-        // basicSalary = only days actually worked or on paid leave
-        // If no attendance data at all AND no leaves, basic = 0
-        const totalPaidDays = summary.presentDays + summary.paidLeaveDays;
-        const basicSalary = parseFloat((totalPaidDays * perDaySalary).toFixed(2));
+        // ── 6. Salary calculation ──
+        // Paid days = present + paid leave + company holidays (holidays always paid)
+        const totalPaidDays = summary.presentDays + summary.paidLeaveDays + holidayDays;
+        const basicSalary = parseFloat(Math.min(totalPaidDays * perDaySalary, monthlySalary).toFixed(2));
 
         // Unpaid deduction for record-keeping
         const deductibleDays  = summary.absentDays + summary.unpaidLeaveDays;
@@ -357,7 +391,7 @@ exports.generateSalarySlip = async (req, res) => {
             absent_days:        summary.absentDays,
             paid_leave_days:    summary.paidLeaveDays,
             unpaid_leave_days:  summary.unpaidLeaveDays,
-            unpaid_deduction:   parseFloat((deductibleDays * perDaySalary).toFixed(2)),
+            unpaid_deduction:   unpaidDeduction,
             basic_salary:       basicSalary,
             overtime_hours:     overtimeHours,
             overtime_amount:    overtimeAmount,
@@ -367,12 +401,15 @@ exports.generateSalarySlip = async (req, res) => {
             is_paid:            false
         };
 
-        console.log('📝 Salary calculation:', {
-            monthlySalary, totalWorkingDays, perDaySalary: perDaySalary.toFixed(2),
+        console.log('📝 Salary calculation (Actual cycle working days):', {
+            monthlySalary,
+            cycleStart: cycle.startDateStr, cycleEnd: cycle.endDateStr,
+            totalWorkingDays, perDaySalary: perDaySalary.toFixed(2),
             presentDays: summary.presentDays, halfDays: summary.halfDays,
             absentDays: summary.absentDays, paidLeaveDays: summary.paidLeaveDays,
             unpaidLeaveDays: summary.unpaidLeaveDays,
-            deductibleDays, basicSalary,
+            holidayDays, holidayNames,
+            totalPaidDays, basicSalary,
             overtimeHours, overtimeAmount, dtDeduction, netSalary
         });
 
