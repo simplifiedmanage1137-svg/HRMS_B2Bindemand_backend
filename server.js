@@ -374,11 +374,11 @@ cron.schedule('0 * * * *', async () => {
         }
 
         // Also fix any orphaned records (clock_out NULL but session closed)
-        const fixResult = await attendanceController.fixOrphanedAttendance(null, null);
-        if (fixResult.fixed > 0) {
-            console.log(`🔧 Hourly fix: ${fixResult.fixed} orphaned records fixed`);
-            logCronActivity('ORPHAN_FIX', `${fixResult.fixed} records fixed`);
-        }
+        // const fixResult = await attendanceController.fixOrphanedAttendance(null, null);
+        // if (fixResult.fixed > 0) {
+        //     console.log(`🔧 Hourly fix: ${fixResult.fixed} orphaned records fixed`);
+        //     logCronActivity('ORPHAN_FIX', `${fixResult.fixed} records fixed`);
+        // }
     } catch (error) {
         console.error('❌ Auto-close cron error:', error);
         logCronActivity('AUTO_CLOSE_ERROR', error.message);

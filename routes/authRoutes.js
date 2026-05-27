@@ -1,154 +1,95 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../config/supabase');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key';
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || JWT_SECRET + '_refresh';
+const ACCESS_TOKEN_EXPIRY = '15m';
+const REFRESH_TOKEN_EXPIRY = '7d';
 
-// Login route
+function generateTokens(payload) {
+    const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
+    const refreshToken = jwt.sign(payload, JWT_REFRESH_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRY });
+    return { accessToken, refreshToken };
+}
+
+// Login
 router.post('/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-        
-        console.log('🔐 Login attempt for email:', email);
 
-        // Validate input
         if (!email || !password) {
-            return res.status(400).json({
-                success: false,
-                message: 'Email and password are required'
-            });
+            return res.status(400).json({ success: false, message: 'Email and password are required' });
         }
 
-        // For admin login with new credentials
+        // Admin hardcoded login
         if (email === 'hr@b2bindemand.com' && password === 'Hr3007') {
-            const token = jwt.sign(
-                { 
-                    id: 1, 
-                    email, 
-                    role: 'admin',
-                    employeeId: 'HR001'
-                },
-                JWT_SECRET,
-                { expiresIn: '7d' }
-            );
-            
-            console.log('✅ Admin login successful for hr@b2bindemand.com');
-            
+            const payload = { id: 1, email, role: 'admin', employeeId: 'HR001' };
+            const { accessToken, refreshToken } = generateTokens(payload);
             return res.json({
                 success: true,
-                token,
-                user: {
-                    id: 1,
-                    email,
-                    role: 'admin',
-                    employeeId: 'HR001',
-                    firstName: 'HR',
-                    lastName: 'Admin',
-                    department: 'Human Resources',
-                    designation: 'HR Manager'
-                }
+                token: accessToken,
+                refreshToken,
+                user: { id: 1, email, role: 'admin', employeeId: 'HR001', firstName: 'HR', lastName: 'Admin', department: 'Human Resources', designation: 'HR Manager' }
             });
         }
 
-        // For employee login - handle both email formats
-        let employeeId = null;
-        let queryEmail = email;
+        // Find employee by email or emp_ format
         let user = null;
 
-        // Check if email is in emp_ format (emp_B2B251201@ems.com)
         if (email.startsWith('emp_') && email.endsWith('@ems.com')) {
-            employeeId = email.replace('emp_', '').replace('@ems.com', '');
-            console.log('🔍 Extracted employee ID from email:', employeeId);
-            
-            // Try to find by employee_id first
-            const { data: userById, error: idError } = await supabase
-                .from('employees')
-                .select('*')
-                .eq('employee_id', employeeId);
-
-            if (!idError && userById && userById.length > 0) {
-                user = userById[0];
-                console.log('✅ User found by employee_id:', user.employee_id);
-            }
+            const employeeId = email.replace('emp_', '').replace('@ems.com', '');
+            const { data } = await supabase.from('employees').select('*').eq('employee_id', employeeId).maybeSingle();
+            user = data;
         }
 
-        // If not found by employee_id, try by email
         if (!user) {
-            console.log('🔍 Trying to find user by email:', queryEmail);
-            const { data: users, error } = await supabase
-                .from('employees')
-                .select('*')
-                .eq('email', queryEmail);
-
-            if (error) {
-                console.error('❌ Database error:', error);
-                throw error;
-            }
-
-            if (users && users.length > 0) {
-                user = users[0];
-                console.log('✅ User found by email:', user.email);
-            }
+            const { data, error } = await supabase.from('employees').select('*').eq('email', email.toLowerCase().trim()).maybeSingle();
+            if (error) throw error;
+            user = data;
         }
 
-        // If user not found by any method
         if (!user) {
-            console.log('❌ User not found');
-            return res.status(401).json({
-                success: false,
-                message: 'Invalid email or password'
-            });
+            return res.status(401).json({ success: false, message: 'Invalid email or password' });
         }
 
-        console.log('📊 User details:', { 
-            id: user.id, 
-            email: user.email, 
-            employeeId: user.employee_id 
-        });
-
-        // For demo purposes, accept default password
-        const isValidPassword = password === 'Welcome@123' || 
-                               password === user.employee_id?.toLowerCase();
-
-        if (!isValidPassword) {
-            console.log('❌ Invalid password for user:', email);
-            return res.status(401).json({
-                success: false,
-                message: 'Invalid email or password'
-            });
-        }
-
-        // Check if employee is active (if is_active column exists)
         if (user.is_active === false) {
-            console.log('❌ Inactive employee:', email);
-            return res.status(403).json({
-                success: false,
-                message: 'Your account is deactivated. Please contact admin.'
-            });
+            return res.status(403).json({ success: false, message: 'Your account is deactivated. Please contact admin.' });
         }
 
-        const token = jwt.sign(
-            { 
-                id: user.id, 
-                email: user.email, 
-                role: 'employee',
-                employeeId: user.employee_id 
-            },
-            JWT_SECRET,
-            { expiresIn: '7d' }
-        );
+        // Verify password with bcrypt, fallback to plain text for legacy
+        let isValid = false;
+        if (user.password) {
+            try {
+                isValid = await bcrypt.compare(password, user.password);
+            } catch {
+                isValid = password === user.password;
+            }
+        }
 
-        console.log('✅ Employee login successful:', email);
+        // Legacy fallback: allow default passwords if no hashed password set
+        if (!isValid && (!user.password || user.password === 'Welcome@123' || user.password === user.employee_id?.toLowerCase())) {
+            isValid = password === 'Welcome@123' || password === user.employee_id?.toLowerCase();
+        }
 
-        res.json({
+        if (!isValid) {
+            return res.status(401).json({ success: false, message: 'Invalid email or password' });
+        }
+
+        const payload = { id: user.id, email: user.email, role: user.role || 'employee', employeeId: user.employee_id };
+        const { accessToken, refreshToken } = generateTokens(payload);
+
+        return res.json({
             success: true,
-            token,
+            token: accessToken,
+            refreshToken,
             user: {
                 id: user.id,
                 email: user.email,
-                role: 'employee',
+                role: user.role || 'employee',
                 employeeId: user.employee_id,
                 firstName: user.first_name,
                 lastName: user.last_name,
@@ -160,131 +101,48 @@ router.post('/login', async (req, res) => {
 
     } catch (error) {
         console.error('❌ Login error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Server error during login',
-            error: process.env.NODE_ENV === 'development' ? error.message : undefined
-        });
+        res.status(500).json({ success: false, message: 'Server error during login', error: process.env.NODE_ENV === 'development' ? error.message : undefined });
     }
 });
 
-// Register route (for creating new employee accounts)
-router.post('/register', async (req, res) => {
+// Refresh token
+router.post('/refresh', async (req, res) => {
     try {
-        const { employee_id, email, password, first_name, last_name, department, designation } = req.body;
-
-        // Validate required fields
-        if (!employee_id || !email || !first_name || !last_name) {
-            return res.status(400).json({
-                success: false,
-                message: 'Missing required fields'
-            });
+        const { refreshToken } = req.body;
+        if (!refreshToken) {
+            return res.status(401).json({ success: false, message: 'Refresh token required' });
         }
 
-        // Check if user already exists
-        const { data: existing, error: checkError } = await supabase
-            .from('employees')
-            .select('id')
-            .or(`email.eq.${email},employee_id.eq.${employee_id}`);
-
-        if (checkError) throw checkError;
-
-        if (existing && existing.length > 0) {
-            return res.status(400).json({
-                success: false,
-                message: 'User with this email or employee ID already exists'
-            });
+        let decoded;
+        try {
+            decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
+        } catch {
+            return res.status(401).json({ success: false, message: 'Invalid or expired refresh token' });
         }
-
-        // Create new employee
-        const { data: newUser, error: insertError } = await supabase
-            .from('employees')
-            .insert([{
-                employee_id,
-                email,
-                first_name,
-                last_name,
-                department: department || null,
-                designation: designation || null,
-                password: password || 'Welcome@123', // In production, hash this!
-                role: 'employee',
-                is_active: true,
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-            }])
-            .select();
-
-        if (insertError) {
-            console.error('❌ Insert error:', insertError);
-            throw insertError;
-        }
-
-        console.log('✅ Employee registered successfully:', employee_id);
-
-        res.status(201).json({
-            success: true,
-            message: 'Employee registered successfully',
-            user: {
-                id: newUser[0].id,
-                employeeId: newUser[0].employee_id,
-                email: newUser[0].email,
-                firstName: newUser[0].first_name,
-                lastName: newUser[0].last_name
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ Registration error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Server error during registration',
-            error: error.message
-        });
-    }
-});
-
-// Verify token route
-router.post('/verify', async (req, res) => {
-    try {
-        const token = req.headers['authorization']?.split(' ')[1];
-
-        if (!token) {
-            return res.status(401).json({
-                success: false,
-                message: 'No token provided'
-            });
-        }
-
-        const decoded = jwt.verify(token, JWT_SECRET);
 
         // Get fresh user data
-        const { data: user, error } = await supabase
-            .from('employees')
-            .select('*')
-            .eq('id', decoded.id)
-            .single();
-
-        if (error || !user) {
-            return res.status(401).json({
-                success: false,
-                message: 'User not found'
-            });
+        let user = null;
+        if (decoded.employeeId === 'HR001') {
+            const { accessToken: newAccess, refreshToken: newRefresh } = generateTokens({ id: decoded.id, email: decoded.email, role: decoded.role, employeeId: decoded.employeeId });
+            return res.json({ success: true, token: newAccess, refreshToken: newRefresh });
         }
 
-        // Check if user is still active
-        if (user.is_active === false) {
-            return res.status(403).json({
-                success: false,
-                message: 'Account is deactivated'
-            });
-        }
+        const { data, error } = await supabase.from('employees').select('id, email, role, employee_id, first_name, last_name, department, designation, profile_image, is_active').eq('id', decoded.id).maybeSingle();
+        if (error || !data) return res.status(401).json({ success: false, message: 'User not found' });
+        if (data.is_active === false) return res.status(403).json({ success: false, message: 'Account deactivated' });
 
-        res.json({
+        user = data;
+        const payload = { id: user.id, email: user.email, role: user.role || 'employee', employeeId: user.employee_id };
+        const { accessToken, refreshToken: newRefreshToken } = generateTokens(payload);
+
+        return res.json({
             success: true,
+            token: accessToken,
+            refreshToken: newRefreshToken,
             user: {
                 id: user.id,
                 email: user.email,
-                role: decoded.role,
+                role: user.role || 'employee',
                 employeeId: user.employee_id,
                 firstName: user.first_name,
                 lastName: user.last_name,
@@ -295,249 +153,182 @@ router.post('/verify', async (req, res) => {
         });
 
     } catch (error) {
-        if (error.name === 'TokenExpiredError') {
-            return res.status(401).json({
-                success: false,
-                message: 'Token expired'
-            });
-        }
-        if (error.name === 'JsonWebTokenError') {
-            return res.status(401).json({
-                success: false,
-                message: 'Invalid token'
-            });
-        }
-        
-        console.error('❌ Token verification error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
+        console.error('❌ Refresh error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
-// Logout route (optional - client just discards token)
-router.post('/logout', (req, res) => {
-    res.json({
-        success: true,
-        message: 'Logged out successfully'
-    });
+// Verify token & return fresh user data
+router.post('/verify', async (req, res) => {
+    try {
+        const token = req.headers['authorization']?.split(' ')[1];
+        if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+
+        let decoded;
+        try {
+            decoded = jwt.verify(token, JWT_SECRET);
+        } catch (err) {
+            if (err.name === 'TokenExpiredError') return res.status(401).json({ success: false, message: 'Token expired', code: 'TOKEN_EXPIRED' });
+            return res.status(401).json({ success: false, message: 'Invalid token' });
+        }
+
+        if (decoded.employeeId === 'HR001') {
+            return res.json({ success: true, user: { id: decoded.id, email: decoded.email, role: 'admin', employeeId: 'HR001', firstName: 'HR', lastName: 'Admin' } });
+        }
+
+        const { data: user, error } = await supabase.from('employees').select('id, email, role, employee_id, first_name, last_name, department, designation, profile_image, is_active').eq('id', decoded.id).maybeSingle();
+
+        if (error || !user) return res.status(401).json({ success: false, message: 'User not found' });
+        if (user.is_active === false) return res.status(403).json({ success: false, message: 'Account deactivated' });
+
+        res.json({
+            success: true,
+            user: {
+                id: user.id,
+                email: user.email,
+                role: user.role || decoded.role || 'employee',
+                employeeId: user.employee_id,
+                firstName: user.first_name,
+                lastName: user.last_name,
+                department: user.department,
+                designation: user.designation,
+                profile_image: user.profile_image
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Verify error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
 });
 
-// Change password route
+// Register
+router.post('/register', async (req, res) => {
+    try {
+        const { employee_id, email, password, first_name, last_name, department, designation } = req.body;
+
+        if (!employee_id || !email || !first_name || !last_name) {
+            return res.status(400).json({ success: false, message: 'Missing required fields' });
+        }
+
+        const { data: existing } = await supabase.from('employees').select('id').or(`email.eq.${email},employee_id.eq.${employee_id}`);
+        if (existing && existing.length > 0) {
+            return res.status(400).json({ success: false, message: 'User with this email or employee ID already exists' });
+        }
+
+        const hashedPassword = await bcrypt.hash(password || 'Welcome@123', 10);
+
+        const { data: newUser, error } = await supabase.from('employees').insert([{
+            employee_id, email, first_name, last_name,
+            department: department || null,
+            designation: designation || null,
+            password: hashedPassword,
+            role: 'employee',
+            is_active: true,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+        }]).select();
+
+        if (error) throw error;
+
+        res.status(201).json({ success: true, message: 'Employee registered successfully', user: { id: newUser[0].id, employeeId: newUser[0].employee_id, email: newUser[0].email } });
+
+    } catch (error) {
+        console.error('❌ Registration error:', error);
+        res.status(500).json({ success: false, message: 'Server error during registration', error: error.message });
+    }
+});
+
+// Logout
+router.post('/logout', (req, res) => {
+    res.json({ success: true, message: 'Logged out successfully' });
+});
+
+// Change password
 router.post('/change-password', async (req, res) => {
     try {
         const token = req.headers['authorization']?.split(' ')[1];
         const { currentPassword, newPassword } = req.body;
 
-        if (!token) {
-            return res.status(401).json({
-                success: false,
-                message: 'No token provided'
-            });
-        }
-
-        if (!currentPassword || !newPassword) {
-            return res.status(400).json({
-                success: false,
-                message: 'Current password and new password are required'
-            });
-        }
-
-        if (newPassword.length < 6) {
-            return res.status(400).json({
-                success: false,
-                message: 'New password must be at least 6 characters long'
-            });
-        }
+        if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
+        if (!currentPassword || !newPassword) return res.status(400).json({ success: false, message: 'Both passwords are required' });
+        if (newPassword.length < 6) return res.status(400).json({ success: false, message: 'New password must be at least 6 characters' });
 
         const decoded = jwt.verify(token, JWT_SECRET);
+        const { data: user, error } = await supabase.from('employees').select('*').eq('id', decoded.id).maybeSingle();
+        if (error || !user) return res.status(404).json({ success: false, message: 'User not found' });
 
-        // Get user
-        const { data: user, error } = await supabase
-            .from('employees')
-            .select('*')
-            .eq('id', decoded.id)
-            .single();
-
-        if (error || !user) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
+        let isValid = false;
+        if (user.password) {
+            try { isValid = await bcrypt.compare(currentPassword, user.password); } catch { isValid = currentPassword === user.password; }
         }
+        if (!isValid) isValid = currentPassword === 'Welcome@123' || currentPassword === user.employee_id?.toLowerCase();
 
-        // Verify current password (for demo, using simple check)
-        const isValidCurrent = currentPassword === 'Welcome@123' || 
-                              currentPassword === user.employee_id?.toLowerCase();
+        if (!isValid) return res.status(401).json({ success: false, message: 'Current password is incorrect' });
 
-        if (!isValidCurrent) {
-            return res.status(401).json({
-                success: false,
-                message: 'Current password is incorrect'
-            });
-        }
-
-        // Update password (in production, hash this!)
-        const { error: updateError } = await supabase
-            .from('employees')
-            .update({
-                password: newPassword,
-                updated_at: new Date().toISOString()
-            })
-            .eq('id', decoded.id);
-
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        const { error: updateError } = await supabase.from('employees').update({ password: hashedPassword, updated_at: new Date().toISOString() }).eq('id', decoded.id);
         if (updateError) throw updateError;
 
-        console.log('✅ Password changed successfully for user:', user.employee_id);
-
-        res.json({
-            success: true,
-            message: 'Password changed successfully'
-        });
+        res.json({ success: true, message: 'Password changed successfully' });
 
     } catch (error) {
-        if (error.name === 'TokenExpiredError') {
-            return res.status(401).json({
-                success: false,
-                message: 'Token expired'
-            });
-        }
-        if (error.name === 'JsonWebTokenError') {
-            return res.status(401).json({
-                success: false,
-                message: 'Invalid token'
-            });
-        }
-        
-        console.error('❌ Password change error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
+        if (error.name === 'TokenExpiredError') return res.status(401).json({ success: false, message: 'Token expired' });
+        if (error.name === 'JsonWebTokenError') return res.status(401).json({ success: false, message: 'Invalid token' });
+        console.error('❌ Change password error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
-// Forgot password route (request password reset)
+// Forgot password
 router.post('/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
+        if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
 
-        if (!email) {
-            return res.status(400).json({
-                success: false,
-                message: 'Email is required'
-            });
-        }
+        const { data: user } = await supabase.from('employees').select('id, email, first_name').eq('email', email).maybeSingle();
 
-        // Check if user exists
-        const { data: user, error } = await supabase
-            .from('employees')
-            .select('id, employee_id, email, first_name')
-            .eq('email', email)
-            .single();
+        // Always return same message for security
+        if (!user) return res.json({ success: true, message: 'If your email exists, you will receive a reset link' });
 
-        if (error || !user) {
-            // Don't reveal that user doesn't exist for security
-            return res.json({
-                success: true,
-                message: 'If your email exists in our system, you will receive a password reset link'
-            });
-        }
-
-        // Generate reset token (valid for 1 hour)
-        const resetToken = jwt.sign(
-            { 
-                id: user.id,
-                email: user.email,
-                purpose: 'password_reset'
-            },
-            JWT_SECRET,
-            { expiresIn: '1h' }
-        );
-
-        // In production, send email with reset link
-        // For demo, just return the token
+        const resetToken = jwt.sign({ id: user.id, email: user.email, purpose: 'password_reset' }, JWT_SECRET, { expiresIn: '1h' });
         console.log('📧 Password reset token for', email, ':', resetToken);
 
         res.json({
             success: true,
-            message: 'If your email exists in our system, you will receive a password reset link',
-            // Only include reset token in development
+            message: 'If your email exists, you will receive a reset link',
             ...(process.env.NODE_ENV === 'development' && { resetToken })
         });
 
     } catch (error) {
         console.error('❌ Forgot password error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
-// Reset password with token
+// Reset password
 router.post('/reset-password', async (req, res) => {
     try {
         const { token, newPassword } = req.body;
+        if (!token || !newPassword) return res.status(400).json({ success: false, message: 'Token and new password are required' });
+        if (newPassword.length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
 
-        if (!token || !newPassword) {
-            return res.status(400).json({
-                success: false,
-                message: 'Token and new password are required'
-            });
-        }
-
-        if (newPassword.length < 6) {
-            return res.status(400).json({
-                success: false,
-                message: 'New password must be at least 6 characters long'
-            });
-        }
-
-        // Verify token
         let decoded;
-        try {
-            decoded = jwt.verify(token, JWT_SECRET);
-        } catch (err) {
-            return res.status(401).json({
-                success: false,
-                message: 'Invalid or expired token'
-            });
+        try { decoded = jwt.verify(token, JWT_SECRET); } catch {
+            return res.status(401).json({ success: false, message: 'Invalid or expired token' });
         }
 
-        // Check if token is for password reset
-        if (decoded.purpose !== 'password_reset') {
-            return res.status(401).json({
-                success: false,
-                message: 'Invalid token purpose'
-            });
-        }
+        if (decoded.purpose !== 'password_reset') return res.status(401).json({ success: false, message: 'Invalid token purpose' });
 
-        // Update password
-        const { error: updateError } = await supabase
-            .from('employees')
-            .update({
-                password: newPassword, // In production, hash this!
-                updated_at: new Date().toISOString()
-            })
-            .eq('id', decoded.id);
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        const { error } = await supabase.from('employees').update({ password: hashedPassword, updated_at: new Date().toISOString() }).eq('id', decoded.id);
+        if (error) throw error;
 
-        if (updateError) throw updateError;
-
-        console.log('✅ Password reset successfully for user ID:', decoded.id);
-
-        res.json({
-            success: true,
-            message: 'Password reset successfully'
-        });
+        res.json({ success: true, message: 'Password reset successfully' });
 
     } catch (error) {
         console.error('❌ Reset password error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
