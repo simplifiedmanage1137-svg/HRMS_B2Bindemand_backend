@@ -73,9 +73,57 @@ const parseShiftTiming = (shiftString) => {
 };
 
 // Calculate overtime
-const calculateOvertime = (totalHours, shiftHours) => {
-    const standardShiftHours = shiftHours || 9;
-    const overtimeHours = Math.floor(Math.max(0, totalHours - standardShiftHours));
+// Rule:
+//   1. Calculate minutes worked AFTER shift end.
+//   2. If that value < 60 min  → no OT (buffer not crossed).
+//   3. If that value >= 60 min → OT = floor(minutes_after_shift_end / 60).
+// Examples (shift 3PM-12AM):
+//   clock-out 12:30AM → 30 min after shift end  < 60 → OT = 0
+//   clock-out  1:00AM → 60 min after shift end  ≥ 60 → OT = floor(60/60)  = 1 hr
+//   clock-out  2:00AM → 120 min after shift end ≥ 60 → OT = floor(120/60) = 2 hrs
+//   clock-out  3:30AM → 210 min after shift end ≥ 60 → OT = floor(210/60) = 3 hrs
+// Examples (shift 9AM-6PM):
+//   clock-out  7:30PM → 90 min after shift end  ≥ 60 → OT = floor(90/60)  = 1 hr
+//   clock-out  8:00PM → 120 min after shift end ≥ 60 → OT = floor(120/60) = 2 hrs
+const calculateOvertime = (clockInIST, clockOutIST, shiftTiming) => {
+    const OT_BUFFER_MINUTES = 60;
+
+    if (!clockInIST || !clockOutIST || !shiftTiming) {
+        return { overtimeHours: 0, overtimeMinutes: 0, hasOvertime: false, overtimeAmount: 0 };
+    }
+
+    // Build shift end datetime using clock-in date as base
+    const ciStr = String(clockInIST).replace('T', ' ').substring(0, 19);
+    const [ciDatePart] = ciStr.split(' ');
+    const [ciY, ciMo, ciD] = ciDatePart.split('-').map(Number);
+
+    const shiftStartTotalMin = shiftTiming.startHour * 60 + shiftTiming.startMinute;
+    const shiftEndTotalMin = shiftTiming.endHour * 60 + shiftTiming.endMinute;
+    const isNightShift = shiftEndTotalMin < shiftStartTotalMin;
+
+    let shiftEndDateStr;
+    if (isNightShift) {
+        // Shift end is on the next calendar day
+        const nextDay = new Date(ciY, ciMo - 1, ciD + 1);
+        shiftEndDateStr = `${nextDay.getFullYear()}-${String(nextDay.getMonth() + 1).padStart(2, '0')}-${String(nextDay.getDate()).padStart(2, '0')} ${String(shiftTiming.endHour).padStart(2, '0')}:${String(shiftTiming.endMinute).padStart(2, '0')}:00`;
+    } else {
+        shiftEndDateStr = `${ciY}-${String(ciMo).padStart(2, '0')}-${String(ciD).padStart(2, '0')} ${String(shiftTiming.endHour).padStart(2, '0')}:${String(shiftTiming.endMinute).padStart(2, '0')}:00`;
+    }
+
+    const shiftEndMs = toUTCMs(shiftEndDateStr);
+    const clockOutMs = toUTCMs(clockOutIST);
+
+    // Minutes worked after shift end
+    const minutesAfterShiftEnd = (clockOutMs - shiftEndMs) / (1000 * 60);
+
+    // Buffer not crossed → no OT
+    if (minutesAfterShiftEnd < OT_BUFFER_MINUTES) {
+        return { overtimeHours: 0, overtimeMinutes: 0, hasOvertime: false, overtimeAmount: 0 };
+    }
+
+    // OT = floor(total minutes after shift end / 60)
+    const overtimeHours = Math.floor(minutesAfterShiftEnd / 60);
+
     return {
         overtimeHours,
         overtimeMinutes: overtimeHours * 60,
@@ -981,7 +1029,7 @@ exports.clockOut = async (req, res) => {
         const clockInMs = toUTCMs(clockInIST);
         const clockOutMs = toUTCMs(clockOutIST);
         let totalMinutes = Math.round((clockOutMs - clockInMs) / (1000 * 60));
-        
+
         // midnight crossing guard
         if (totalMinutes < 0) totalMinutes += 24 * 60;
         const totalHours = totalMinutes / 60;
@@ -999,7 +1047,7 @@ exports.clockOut = async (req, res) => {
             status = 'absent';
         }
 
-        const overtime = calculateOvertime(totalHours, shiftTiming.totalHours);
+        const overtime = calculateOvertime(clockInIST, clockOutIST, shiftTiming);
 
         // Calculate display hours and minutes
         const displayHours = Math.floor(totalMinutes / 60);
@@ -1163,6 +1211,15 @@ exports.clockOutMissed = async (req, res) => {
         if (updateError) {
             console.error('Error updating attendance:', updateError);
             throw updateError;
+        }
+
+        // Also close any active session for this employee
+        if (attendance.session_id) {
+            await supabase
+                .from('attendance_sessions')
+                .update({ is_active: false, clock_out_time: new Date().toISOString() })
+                .eq('session_id', attendance.session_id)
+                .eq('employee_id', employee_id);
         }
 
         res.json({
@@ -1381,21 +1438,23 @@ exports.getTodayAttendance = async (req, res) => {
                     });
 
                     // Update database if values have changed significantly
-                    const storedLateMinutes = parseFloat(todayAttendance[0].late_minutes) || 0;
-                    const needsUpdate = Math.abs(storedLateMinutes - formattedAttendance.late_minutes) > 0.01 ||
-                        todayAttendance[0].late_display !== formattedAttendance.late_display;
+                    const storedRecord = todayAttendance && todayAttendance.length > 0 ? todayAttendance[0] : null;
+                    if (storedRecord) {
+                        const storedLateMinutes = parseFloat(storedRecord.late_minutes) || 0;
+                        const needsUpdate = Math.abs(storedLateMinutes - formattedAttendance.late_minutes) > 0.01 ||
+                            storedRecord.late_display !== formattedAttendance.late_display;
 
-                    if (needsUpdate) {
-                        console.log(`🔄 Updating attendance record ${todayAttendance[0].id} with correct late marks`);
-                        const updatePayload = { late_minutes: formattedAttendance.late_minutes };
-                        // Only include late_display if it was previously stored (column exists)
-                        if (todayAttendance[0].hasOwnProperty('late_display')) {
-                            updatePayload.late_display = formattedAttendance.late_display;
+                        if (needsUpdate) {
+                            console.log(`🔄 Updating attendance record ${storedRecord.id} with correct late marks`);
+                            const updatePayload = { late_minutes: formattedAttendance.late_minutes };
+                            if (storedRecord.hasOwnProperty('late_display')) {
+                                updatePayload.late_display = formattedAttendance.late_display;
+                            }
+                            await supabase
+                                .from('attendance')
+                                .update(updatePayload)
+                                .eq('id', storedRecord.id);
                         }
-                        await supabase
-                            .from('attendance')
-                            .update(updatePayload)
-                            .eq('id', todayAttendance[0].id);
                     }
                 }
             }

@@ -550,14 +550,12 @@ router.get('/profile/:employeeId', async (req, res) => {
 // Get all employees (returns array directly)
 router.get('/', async (req, res) => {
     try {
-        const { page = 1, limit = 50, department, search, active } = req.query;
-        const offset = (page - 1) * limit;
+        const { department, search, active } = req.query;
 
         let query = supabase
             .from('employees')
-            .select('*', { count: 'exact' });
+            .select('*');
 
-        // Apply filters
         if (department) {
             query = query.eq('department', department);
         }
@@ -566,23 +564,17 @@ router.get('/', async (req, res) => {
             query = query.or(`first_name.ilike.%${search}%,last_name.ilike.%${search}%,employee_id.ilike.%${search}%,email.ilike.%${search}%`);
         }
 
-        // Filter active employees if requested
         if (active === 'true') {
             query = query.eq('is_active', true);
         }
 
-        // Apply pagination
-        query = query
-            .order('created_at', { ascending: false })
-            .range(offset, offset + limit - 1);
+        query = query.order('created_at', { ascending: false });
 
-        const { data, error, count } = await query;
+        const { data, error } = await query;
 
         if (error) throw error;
 
         console.log(`📊 Found ${data?.length || 0} employees`);
-
-        // Return array directly
         res.json(data || []);
 
     } catch (error) {
