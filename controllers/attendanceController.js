@@ -85,6 +85,7 @@ const parseShiftTiming = (shiftString) => {
 // Examples (shift 9AM-6PM):
 //   clock-out  7:30PM → 90 min after shift end  ≥ 60 → OT = floor(90/60)  = 1 hr
 //   clock-out  8:00PM → 120 min after shift end ≥ 60 → OT = floor(120/60) = 2 hrs
+
 const calculateOvertime = (clockInIST, clockOutIST, shiftTiming) => {
     const OT_BUFFER_MINUTES = 60;
 
@@ -1083,6 +1084,21 @@ exports.clockOut = async (req, res) => {
             throw updateError;
         }
 
+        // ✅ Check if today is a holiday and employee worked 9+ hours → award Comp-Off
+        try {
+            const CompOffService = require('../services/compOffService');
+            const compOff = await CompOffService.checkHolidayWork(
+                employee_id,
+                attendanceRecord.attendance_date,
+                parseFloat(totalHours.toFixed(2))
+            );
+            if (compOff) {
+                console.log(`🎉 Comp-Off awarded to ${employee_id} for working on holiday ${attendanceRecord.attendance_date}`);
+            }
+        } catch (compOffError) {
+            console.error('⚠️ Comp-off check failed (non-critical):', compOffError.message);
+        }
+
         // Update session as inactive
         console.log('⏱️ Updating session...');
         const { error: sessionError } = await supabase
@@ -1222,6 +1238,18 @@ exports.clockOutMissed = async (req, res) => {
                 .eq('employee_id', employee_id);
         }
 
+        // Check comp-off: holiday + 9+ hours worked
+        try {
+            const CompOffService = require('../services/compOffService');
+            await CompOffService.checkHolidayWork(
+                employee_id,
+                attendance.attendance_date,
+                parseFloat(totalHours.toFixed(2))
+            );
+        } catch (e) {
+            console.error('⚠️ Comp-off check failed (non-critical):', e.message);
+        }
+
         res.json({
             success: true,
             message: `Clocked out successfully for ${attendance.attendance_date} at ${clockOutIST.split(' ')[1]}`,
@@ -1301,6 +1329,7 @@ exports.getTodayAttendance = async (req, res) => {
         // Use today's attendance if it exists, otherwise use active session attendance
         // Cross-midnight support: also accept active session attendance from previous day
         // if the session is still active (employee hasn't clocked out yet)
+
         const activeSessionMatchesToday = activeSessionAttendance &&
             activeSessionAttendance.attendance_date &&
             activeSessionAttendance.attendance_date.split('T')[0] === todayStr;
@@ -2064,6 +2093,18 @@ exports.approveRegularization = async (req, res) => {
                 throw updateError;
             }
             console.log('✅ Attendance updated successfully');
+
+            // Check comp-off: holiday + 9+ hours worked
+            try {
+                const CompOffService = require('../services/compOffService');
+                await CompOffService.checkHolidayWork(
+                    request.employee_id,
+                    attendanceRecord.attendance_date,
+                    parseFloat(totalHours.toFixed(2))
+                );
+            } catch (e) {
+                console.error('⚠️ Comp-off check failed (non-critical):', e.message);
+            }
         }
 
         // Also update the regularization request's attendance_id if it was wrong
@@ -2496,13 +2537,34 @@ exports.getCompOffBalance = async (req, res) => {
 exports.getCompOffHistory = async (req, res) => {
     try {
         const { employee_id } = req.params;
+
+        // Authorization: employee can only view own, admin can view all
+        if (req.user?.employeeId !== employee_id && req.user?.role !== 'admin') {
+            return res.status(403).json({ success: false, message: 'Access denied' });
+        }
+
         const { data, error } = await supabase
             .from('comp_off_earnings')
             .select('*')
             .eq('employee_id', employee_id)
             .order('attendance_date', { ascending: false });
+
         if (error) throw error;
-        res.json({ success: true, earnings: data || [] });
+
+        // Add expiry_date (attendance_date + 45 days) and status to each record
+        const today = new Date().toISOString().split('T')[0];
+        const earnings = (data || []).map(item => {
+            const d = new Date(item.attendance_date);
+            d.setDate(d.getDate() + 45);
+            const expiry_date = d.toISOString().split('T')[0];
+            return {
+                ...item,
+                expiry_date,
+                status: item.is_used ? 'used' : (expiry_date < today ? 'expired' : 'available')
+            };
+        });
+
+        res.json({ success: true, earnings });
     } catch (error) {
         console.error('Error fetching comp-off history:', error);
         res.status(500).json({ success: false, message: 'Failed to fetch comp-off history', error: error.message });

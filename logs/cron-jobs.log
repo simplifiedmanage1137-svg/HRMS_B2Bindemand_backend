@@ -42,3 +42,11 @@
 {"timestamp":"2026-05-21T10:30:02.326Z","type":"AUTO_CLOSE","message":"1 sessions closed","duration":2306,"environment":"development"}
 {"timestamp":"2026-05-21T18:29:09.306Z","type":"END_OF_DAY","message":"Marked 30 absent, 10 half_day","duration":9275,"environment":"development"}
 {"timestamp":"2026-05-22T18:29:17.075Z","type":"END_OF_DAY","message":"Marked 30 absent, 11 half_day","duration":17007,"environment":"development"}
+{"timestamp":"2026-05-28T17:30:01.766Z","type":"AUTO_CLOSE","message":"1 sessions closed","duration":1733,"environment":"development"}
+{"timestamp":"2026-05-28T18:29:13.410Z","type":"END_OF_DAY","message":"Marked 42 absent, 11 half_day","duration":13361,"environment":"development"}
+{"timestamp":"2026-05-29T12:30:01.209Z","type":"AUTO_CLOSE","message":"1 sessions closed","duration":1144,"environment":"development"}
+{"timestamp":"2026-05-29T18:29:18.971Z","type":"END_OF_DAY","message":"Marked 46 absent, 9 half_day","duration":18935,"environment":"development"}
+{"timestamp":"2026-05-30T18:29:12.908Z","type":"END_OF_DAY","message":"Marked 61 absent, 0 half_day","duration":12858,"environment":"development"}
+{"timestamp":"2026-05-30T20:30:01.107Z","type":"WEEKLY_CLEANUP_ERROR","message":"aggregate functions are not allowed in RETURNING","duration":null,"environment":"development"}
+{"timestamp":"2026-06-01T18:29:17.946Z","type":"END_OF_DAY","message":"Marked 42 absent, 15 half_day","duration":17882,"environment":"development"}
+{"timestamp":"2026-06-02T09:30:00.977Z","type":"AUTO_CLOSE","message":"1 sessions closed","duration":955,"environment":"development"}

@@ -28,6 +28,7 @@ const updateResponseRoutes = require('./routes/updateResponseRoutes');
 const noticeRoutes = require('./routes/noticeRoutes');
 const announcementRoutes = require('./routes/announcementRoutes');
 const ratingRoutes = require('./routes/ratingRoutes');
+const loginFeedRoutes = require('./routes/loginFeedRoutes');
 
 // Import attendance controller for cron jobs
 const attendanceController = require('./controllers/attendanceController');
@@ -131,6 +132,8 @@ const { uploadsDir } = createUploadDirectories();
 // Serve static files
 app.use('/uploads', express.static(uploadsDir));
 app.use('/uploads/announcements', express.static(path.join(__dirname, 'uploads/announcements')));
+app.use('/uploads/office-events', express.static(path.join(__dirname, 'uploads/office-events')));
+app.use('/uploads/office-events', express.static(path.join(__dirname, 'uploads/office-events')));
 
 // ============== MULTER CONFIGURATION ==============
 const documentStorage = multer.diskStorage({
@@ -208,6 +211,8 @@ const requireAdmin = (req, res, next) => {
 // ============== ROUTES ==============
 // Public routes (no authentication needed)
 app.use('/api/auth', authRoutes);
+app.use('/api/public', loginFeedRoutes);
+app.use('/api/public', loginFeedRoutes);
 
 // Protected routes (authentication required)
 app.use('/api/employees', authenticateToken, employeeRoutes);

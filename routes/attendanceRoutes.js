@@ -37,9 +37,9 @@ module.exports = (supabase, authenticateToken, requireAdmin) => {
     // Overtime endpoints (Admin or own data)
     router.get('/overtime/:employee_id/:month/:year', authenticateToken, attendanceController.getOvertimeSummary);
 
-    // Comp-off endpoints (Admin only)
-    router.get('/comp-off/:employee_id', authenticateToken, requireAdmin, attendanceController.getCompOffBalance);
-    router.get('/comp-off/:employee_id/history', authenticateToken, requireAdmin, attendanceController.getCompOffHistory);
+    // Comp-off endpoints - employee can view own, admin can view all
+    router.get('/comp-off/:employee_id', authenticateToken, attendanceController.getCompOffBalance);
+    router.get('/comp-off/:employee_id/history', authenticateToken, attendanceController.getCompOffHistory);
 
     // Auto-close stale sessions (Admin only)
     router.post('/auto-close-stale', authenticateToken, requireAdmin, async (req, res) => {

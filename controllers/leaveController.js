@@ -88,8 +88,21 @@ exports.getLeaveBalance = async (req, res) => {
 
         if (empError) throw empError;
 
-        const joiningDate = new Date(employee.joining_date);
+        // Get actual valid comp-off count from comp_off_earnings table (non-expired, non-used)
         const today = new Date();
+        const todayStr = today.toISOString().split('T')[0];
+        const CompOffService = require('../services/compOffService');
+        const actualCompOffBalance = await CompOffService.getValidCompOffCount(employee_id);
+
+        // Sync employees table if mismatch
+        if (actualCompOffBalance !== (employee.comp_off_balance || 0)) {
+            await supabase
+                .from('employees')
+                .update({ comp_off_balance: actualCompOffBalance })
+                .eq('employee_id', employee_id);
+        }
+
+        const joiningDate = new Date(employee.joining_date);
         const currentYear = today.getFullYear();
 
         const currentYearAccrual = calculateCurrentYearAccruedLeaves(joiningDate, today);
@@ -173,7 +186,7 @@ exports.getLeaveBalance = async (req, res) => {
             available: available.toFixed(1),
             unpaid_used: unpaidUsed.toFixed(1),
             unpaid_pending: unpaidPending.toFixed(1),
-            comp_off_balance: (employee.comp_off_balance || 0).toFixed(1),
+            comp_off_balance: actualCompOffBalance.toFixed(1),
             months_completed_in_year: completedMonths,
             total_months_from_joining: totalMonthsFromJoining,
             is_probation_complete: isProbComplete,
